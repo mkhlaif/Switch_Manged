@@ -88,9 +88,11 @@ services:
     environment:
       NGINX_SITE: ${NGINX_SITE:-http.conf}
       PUBLIC_HTTPS_PORT: ${HTTPS_PORT:-8443}
+    # BIND_ADDRESS=127.0.0.1 (default): reachable only from this machine. Set it to the
+    # server's LAN IP (or 0.0.0.0) to allow other PCs — see docs/NETWORK_SETUP.md.
     ports:
-      - "${HTTP_PORT:-8080}:8080"
-      - "${HTTPS_PORT:-8443}:8443"
+      - "${BIND_ADDRESS:-127.0.0.1}:${HTTP_PORT:-8080}:8080"
+      - "${BIND_ADDRESS:-127.0.0.1}:${HTTPS_PORT:-8443}:8443"
     volumes:
       # For NGINX_SITE=https.conf place tls.crt and tls.key in ./certs
       - ./certs:/etc/nginx/certs:ro

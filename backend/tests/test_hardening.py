@@ -117,6 +117,9 @@ def test_fresh_install_defaults_block_state_changes(monkeypatch):
     compose = (ROOT / "docker-compose.yml").read_text(encoding="utf-8")
     assert "${NETWORK_COMMAND_EXECUTION:-DISABLED}" in compose
     assert "${READ_ONLY_MODE:-true}" in compose
+    # Web ports are published on localhost only unless the administrator opts in to LAN access.
+    assert '"${BIND_ADDRESS:-127.0.0.1}:${HTTP_PORT:-8080}:8080"' in compose
+    assert '"${BIND_ADDRESS:-127.0.0.1}:${HTTPS_PORT:-8443}:8443"' in compose
     example = (ROOT / ".env.example").read_text(encoding="utf-8")
     assert "NETWORK_COMMAND_EXECUTION=DISABLED" in example and "READ_ONLY_MODE=true" in example
 
