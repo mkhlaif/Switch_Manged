@@ -1,7 +1,9 @@
 # Windows setup
 
-Tested on Windows 11 with Docker Desktop 4.x (WSL 2 back end), Git for Windows 2.53 and Windows
-PowerShell 5.1. Run the commands in **PowerShell**.
+Tested on Windows 11 with Docker Desktop 4.x (Docker Engine 28.5, Compose 2.40, WSL 2 back end),
+Git for Windows 2.53 and Windows PowerShell 5.1 — the commands below were run as written on a
+clean copy of the repository (init, build, admin creation, import, backup, restore). Run the
+commands in **PowerShell**.
 
 ## 1. Install the software
 
@@ -67,8 +69,14 @@ migrations run automatically when the backend starts.
 docker compose exec backend python -m app.cli create-user --role admin admin
 ```
 
-Type the password twice when asked (12+ characters, three of: lower case, upper case, digit,
-symbol).
+Type the password when asked (12+ characters, three of: lower case, upper case, digit, symbol);
+it is not shown while typing. For a scripted installation the password can be piped instead:
+
+```powershell
+"<password>" | docker compose exec -T backend python -m app.cli create-user --role admin --password-stdin admin
+```
+
+(Windows PowerShell adds a CR/LF to piped text; the tool strips it — older versions did not.)
 
 ## 6. Open the application
 

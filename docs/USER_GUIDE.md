@@ -58,15 +58,16 @@ separately (operators and administrators only).
    relearned*), VLAN, and the **change report** (before/after).
 
 Blocked by design: UNKNOWN ports, declared uplinks, link aggregates, TRUNK / LIKELY TRUNK ports
-and every port of a core/distribution switch (only administrators in EMERGENCY mode). Outside
-MAINTENANCE mode, or with dry run on, restarts are only simulated.
+and every port of a core/distribution switch (only administrators in EMERGENCY mode), and ports
+that are administratively disabled (a restart would enable them). Outside MAINTENANCE mode, or
+with dry run on, restarts are only simulated.
 
 ## Other pages
 
 | Page | Content |
 |---|---|
 | Dashboard | safety state, circuit breaker, open alerts, inventory health, recent activity |
-| Switches / Topology | inventory, switch details (NetBox/Zabbix panels), switches by role and LLDP links |
+| Switches / Topology | inventory (site, location, role), switch details (NetBox/Zabbix panels), switches by role and LLDP links; administrators also see *Import* and *Export* |
 | Alerts | multiple locations, MAC moves, undeclared trunks, SSH failures, failed restarts, … (operators can acknowledge) |
 | Search History / Port Actions | past searches and restarts with change reports; CSV export |
 | Safety Controls | modes, kill switch (operators may **engage** STOP ALL NETWORK OPERATIONS), breaker, locks |

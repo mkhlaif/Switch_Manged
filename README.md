@@ -16,7 +16,9 @@ Two separate experiences:
 - **Technical interface** for network staff: MAC search, port details, topology, alerts, audit,
   safety controls, administration.
 - **Simple screen** for non-technical staff (role `MAC_OPERATOR`): enter a MAC address → see the
-  switch name → press *Restart device* → confirm. Nothing technical is shown.
+  device's **location** (e.g. *Building A - Floor 2 - Office 204*) → press *Restart device* →
+  confirm. No administrator approval is needed, but the server runs every technical safety check
+  first. Nothing technical is shown — the API itself never sends it to this role.
 
 ## Features
 
@@ -27,7 +29,11 @@ Two separate experiences:
 - Controlled port restart (link bounce or PoE power cycle): re-check, typed confirmation
   `RESTART PORT <port>`, pre-restart re-verification, locks, post-restart verification, change
   report.
-- Simplified MAC_OPERATOR workflow (backend-enforced, not just hidden buttons).
+- Simplified MAC_OPERATOR workflow (backend-enforced, not just hidden buttons): location only,
+  direct restart of a verified endpoint port with an automatic multi-signal safety check, fresh
+  re-verification before and after the restart.
+- Bulk switch import (CSV / JSON, validated preview, background batches, idempotent) and export
+  (CSV / JSON, never secrets) for administrators.
 - Network path (device → access switch → distribution → core) and a read-only topology view,
   built from LLDP evidence without extra commands.
 - Alerts (multiple locations, MAC moves, undeclared trunks, SSH failures, circuit breaker, failed
@@ -68,7 +74,9 @@ Tailwind. Database: PostgreSQL. Deployment: Docker Compose. Details:
   or unexpected switch output; **kill switch** "STOP ALL NETWORK OPERATIONS".
 - **Audit logs** that the database refuses to modify or delete.
 - SSH host-key pinning, encrypted switch credentials, argon2 passwords, CSRF protection, idle
-  session timeout.
+  session timeout, request size and rate limits.
+- Containers run as non-root users with dropped capabilities; the database is on an internal
+  network the web proxy cannot reach.
 
 Details: [docs/SECURITY.md](docs/SECURITY.md) and
 [docs/SECURITY_FIREWALL.md](docs/SECURITY_FIREWALL.md).
@@ -102,13 +110,15 @@ Needs Git and Docker (Docker Desktop on Windows, Docker Engine on Linux). Exact 
    set `BIND_ADDRESS` and HTTPS (see [docs/NETWORK_SETUP.md](docs/NETWORK_SETUP.md)).
 6. Start: `docker compose up -d --build`
 7. Database migrations run automatically when the backend starts (`docker compose logs backend`
-   shows "Running upgrade … -> 0003"; nothing to run by hand).
+   shows "Running upgrade … -> 0004"; nothing to run by hand).
 8. Create the first administrator:
    `docker compose exec backend python -m app.cli create-user --role admin admin`
 9. Open `http://localhost:8080` and sign in. Health: `http://localhost:8080/health`.
 10. Keep `READ_ONLY_MODE=true` and `NETWORK_COMMAND_EXECUTION=DISABLED` — the safety indicator shows
     **STOPPED / READ ONLY**.
-11. Add switches, credentials and trusted host keys (*Switches*, *Settings → Credentials*).
+11. Add credentials (*Settings → Credentials*), then switches — one by one or with *Switches →
+    Import* ([docs/SWITCH_IMPORT_EXPORT.md](docs/SWITCH_IMPORT_EXPORT.md)) — and trust their host
+    keys.
 12. Test SSH on each switch (*Test SSH connection*, *Detect model / AOS*).
 13. Test a MAC search.
 14. Run the lab verification for each model family/AOS version (*Settings → Command profiles*).
@@ -150,9 +160,11 @@ Invoke-RestMethod http://127.0.0.1:8080/health
   `CREDENTIAL_ENCRYPTION_KEY` securely.
 - **Database:** PostgreSQL runs in Docker (volume `pgdata`); migrations run automatically at
   every backend start — no manual SQL.
-- **HTTPS and LAN access:** put `tls.crt`/`tls.key` into `./certs`, set `NGINX_SITE=https.conf` and
-  `BIND_ADDRESS=<server LAN IP>`, open the port in the firewall, `docker compose up -d`; users
-  open `https://SERVER-IP:8443` ([docs/NETWORK_SETUP.md](docs/NETWORK_SETUP.md)).
+- **HTTPS and LAN access:** put `tls.crt`/`tls.key` into `./certs` (Linux: `sudo chown 101:101
+  certs/tls.key certs/tls.crt && sudo chmod 400 certs/tls.key` — nginx runs unprivileged), set
+  `NGINX_SITE=https.conf` and `BIND_ADDRESS=<server LAN IP>`, open the port in the firewall,
+  `docker compose up -d`; users open `https://SERVER-IP:8443`
+  ([docs/NETWORK_SETUP.md](docs/NETWORK_SETUP.md)).
 - **Switches:** *Settings → Credentials* (SSH account, stored encrypted), *Switches → Add switch*,
   then on the switch page *Fetch host key* → compare the fingerprint with the switch → *Trust*,
   *Test SSH connection*, *Detect model / AOS* (TCP/22 from the server to the switches).
@@ -194,6 +206,8 @@ All configuration is in `.env` (created from [.env.example](.env.example); never
 | `NETBOX_URL` / `NETBOX_TOKEN`, `ZABBIX_URL` / `ZABBIX_TOKEN` | empty | optional read-only integrations |
 | `ENABLE_SIMULATOR` | `false` | lab mode with simulated switches — never in production |
 | `LOG_LEVEL` / `LOG_FORMAT` | `INFO` / `text` | `json` for log collectors |
+| `BACKEND_MEMORY_LIMIT` / `POSTGRES_MEMORY_LIMIT` / `FRONTEND_MEMORY_LIMIT` | `1g` / `1g` / `256m` | container memory limits |
+| `DB_POOL_SIZE` / `DB_MAX_OVERFLOW` / `DB_POOL_TIMEOUT` / `DB_STATEMENT_TIMEOUT` | `10` / `10` / `30` s / `60` s | database pool and timeouts ([docs/DATABASE.md](docs/DATABASE.md)) |
 
 ## Running
 
@@ -229,18 +243,19 @@ Details: [docs/NETWORK_SETUP.md](docs/NETWORK_SETUP.md).
 
 Each switch needs SSH enabled and an account the application can use (read-only privileges are
 enough until restarts are enabled). In the application: add the credential, add the switch
-(name, management IP, credential, topology role, uplink ports), trust its SSH host key after
-comparing the fingerprint, then *Test SSH connection* and *Detect model / AOS*. See
-[docs/ADMIN_GUIDE.md](docs/ADMIN_GUIDE.md).
+(name, management IP, credential, site/location, topology role, uplink ports, device locations
+per port) — or import many at once from CSV/JSON ([docs/SWITCH_IMPORT_EXPORT.md](docs/SWITCH_IMPORT_EXPORT.md)) —
+trust its SSH host key after comparing the fingerprint, then *Test SSH connection* and *Detect
+model / AOS*. See [docs/ADMIN_GUIDE.md](docs/ADMIN_GUIDE.md).
 
 ## User roles
 
 | Role | Can |
 |---|---|
 | `READ_ONLY` (`readonly`) | technical search, port details, topology, alerts, history |
-| `MAC_OPERATOR` (`mac_operator`) | only the simple screen: search a MAC, see the switch name, restart a confidently identified endpoint port |
+| `MAC_OPERATOR` (`mac_operator`) | only the simple screen: search a MAC, see the device location, restart that device's verified endpoint port directly (no approval, automatic safety checks) |
 | `OPERATOR` (`operator`) | read-only rights + restart access ports, acknowledge alerts, engage the kill switch |
-| `ADMIN` (`admin`) | everything: users, switches, credentials, command profiles, safety controls, audit |
+| `ADMIN` (`admin`) | everything: users, switches, bulk import/export, credentials, command profiles, safety controls, audit |
 
 Nobody can change their own role. Full matrix: *Settings → Roles* and
 [docs/SECURITY.md](docs/SECURITY.md#3-rbac).
@@ -248,10 +263,16 @@ Nobody can change their own role. Full matrix: *Settings → Roles* and
 ## MAC_OPERATOR
 
 Non-technical staff sign in and see one screen: enter the MAC address, press **SEARCH**, read the
-switch name, press **RESTART DEVICE**, confirm, wait for "Device restarted successfully." The
-server re-checks everything and refuses anything that is not a confidently identified endpoint
-port ("This device cannot be restarted automatically. Please contact IT support.").
-Guide: [docs/MAC_OPERATOR_GUIDE.md](docs/MAC_OPERATOR_GUIDE.md).
+**location**, press **RESTART DEVICE**, confirm, wait for "Device restarted successfully." There
+is no administrator approval step. Instead the server re-reads the port on the switch and
+requires independent evidence that it is a single endpoint port (ACCESS with High confidence on
+an access switch, one untagged VLAN, few MACs, no switch neighbour, port enabled and up, no
+infrastructure description, NetBox agreeing when configured, unchanged since the search), then
+runs the Command Safety Firewall, locks, the safety modes, a final re-check and a post-restart
+verification. Anything uncertain → "This device cannot be restarted automatically. Please
+contact IT support." (reason in the audit log). Guide:
+[docs/MAC_OPERATOR_GUIDE.md](docs/MAC_OPERATOR_GUIDE.md); every check:
+[docs/SECURITY.md](docs/SECURITY.md#4-mac_operator-direct-endpoint-restart).
 
 ## Production enablement
 
@@ -287,7 +308,9 @@ unavailable", SAFE MODE, port conflicts): [docs/TROUBLESHOOTING.md](docs/TROUBLE
 | Document | Content |
 |---|---|
 | [ARCHITECTURE](docs/ARCHITECTURE.md) | components, data flow, design decisions |
-| [SECURITY](docs/SECURITY.md) · [SECURITY_FIREWALL](docs/SECURITY_FIREWALL.md) | security model, command firewall |
+| [SECURITY](docs/SECURITY.md) · [SECURITY_FIREWALL](docs/SECURITY_FIREWALL.md) | security model, MAC_OPERATOR checks, command firewall |
+| [DATABASE](docs/DATABASE.md) | schema, constraints, indexes, migrations, reliability |
+| [SWITCH_IMPORT_EXPORT](docs/SWITCH_IMPORT_EXPORT.md) | bulk switch import (CSV/JSON) and export |
 | [DEPLOYMENT](docs/DEPLOYMENT.md) | installation, HTTPS, first-time configuration, production enablement |
 | [WINDOWS_SETUP](docs/WINDOWS_SETUP.md) · [LINUX_SETUP](docs/LINUX_SETUP.md) | step-by-step installation |
 | [NETWORK_SETUP](docs/NETWORK_SETUP.md) | LAN access, firewall, switch connectivity |
@@ -301,20 +324,22 @@ unavailable", SAFE MODE, port conflicts): [docs/TROUBLESHOOTING.md](docs/TROUBLE
 ```bash
 cd backend && pip install -r requirements-dev.txt && python -m pytest    # no real switch needed
 cd frontend && npm ci && npm test && npm run build
-python backend/scripts/perf_search.py --switches 10 50 100               # performance (simulated)
+python backend/scripts/perf_search.py --switches 100 500 1000           # performance (simulated)
 ```
 
 The backend tests use a simulated OmniSwitch lab (in-process and over real SSH) — MAC found,
 missing, multiple locations, timeouts, authentication failure, unexpected output, access/trunk
-ports, restart success/failure, MAC not returning. CI runs the same suites on every push
+ports, restart success/failure, MAC not returning, the MAC_OPERATOR safety gate, import/export,
+migrations and session security. CI runs the same suites on every push
 ([.github/workflows/ci.yml](.github/workflows/ci.yml)).
 
 ## Known limitations
 
 - Commands are documentation-verified, not yet executed on real OmniSwitch hardware (the lab
-  verification step exists for this).
+  verification step exists for this). Status: **application production ready for lab
+  validation** — not yet validated on a production network.
 - Zabbix: only host availability and current problems are shown; traffic/CPU/memory/temperature
   items are template-specific and not read.
 - One backend process by design (no Redis); no MFA/SSO.
-- See [FINAL_PROJECT_REPORT.md](FINAL_PROJECT_REPORT.md#10-known-limitations) for the complete
+- See [FINAL_PROJECT_REPORT.md](FINAL_PROJECT_REPORT.md#known-limitations) for the complete
   list.

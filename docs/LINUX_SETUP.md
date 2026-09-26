@@ -3,6 +3,12 @@
 Commands for a fresh Ubuntu server. Other modern distributions work the same way once Git,
 Docker Engine and the Compose plugin are installed.
 
+Tested on Ubuntu 24.04.3 (WSL2, Docker Engine 28.5 through Docker Desktop integration, as a
+normal user in the `docker` group): `init-env.sh` (`.env` created with mode 600), build and start,
+admin creation, import/export, `backup.sh` (dump mode 600), `restore.sh --yes`, HTTPS with the
+steps below, teardown. Not tested there: the `ufw` firewall step (it needs `sudo`), and a
+bare-metal server.
+
 ## 1. Install Git, OpenSSL and Docker
 
 ```bash
@@ -55,8 +61,12 @@ testing:
 ```bash
 openssl req -x509 -newkey rsa:2048 -nodes -keyout certs/tls.key -out certs/tls.crt \
   -days 825 -subj "/CN=$(hostname -f)"
-chmod 600 certs/tls.key
+# nginx runs as the unprivileged user uid 101 inside the container: give it the key
+sudo chown 101:101 certs/tls.key certs/tls.crt && sudo chmod 400 certs/tls.key
 ```
+
+Without the `chown` the web container keeps restarting with `cannot load certificate key …
+Permission denied` (`docker compose logs frontend`).
 
 In `.env`: `NGINX_SITE=https.conf`, and for LAN access `BIND_ADDRESS=<server LAN IP>` (see
 [NETWORK_SETUP.md](NETWORK_SETUP.md)).
@@ -125,5 +135,6 @@ docker compose logs --since 1h backend | grep SECURITY
 | `port is already allocated` | change `HTTP_PORT` / `HTTPS_PORT` in `.env` |
 | other PCs cannot connect | `BIND_ADDRESS` still `127.0.0.1`, or blocked in `DOCKER-USER` / network firewall |
 | backend `unhealthy` | `docker compose logs backend` — usually a wrong `CREDENTIAL_ENCRYPTION_KEY` or database password change after the first start |
+| frontend restarting, log `cannot load certificate key … Permission denied` | `sudo chown 101:101 certs/tls.key certs/tls.crt && sudo chmod 400 certs/tls.key` |
 
 More: [TROUBLESHOOTING.md](TROUBLESHOOTING.md).

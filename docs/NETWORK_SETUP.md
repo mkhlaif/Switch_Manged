@@ -9,6 +9,16 @@ use it:
 1. **Use HTTPS.** Put the certificate in `certs/tls.crt` and the key in `certs/tls.key` (internal
    CA recommended) and set `NGINX_SITE=https.conf`. With `COOKIE_SECURE=true` (default) browsers
    only send the session cookie over HTTPS — plain `http://SERVER-IP:8080` logins fail by design.
+   nginx runs as the unprivileged user **uid 101**, so on Linux the key must be readable by it:
+
+   ```bash
+   sudo chown 101:101 certs/tls.key certs/tls.crt && sudo chmod 400 certs/tls.key
+   ```
+
+   Otherwise the web container restarts with `cannot load certificate key … Permission denied`
+   (`docker compose logs frontend`). On Windows with Docker Desktop no change is needed.
+   Tested on Ubuntu 24.04: HTTPS health, HSTS, CSP and the HTTP → HTTPS redirect (which keeps a
+   non-standard `HTTPS_PORT`).
 2. **Choose the interface:** `BIND_ADDRESS=<server LAN/management IP>` (preferred) or `0.0.0.0`
    (all interfaces).
 3. **Ports:** `HTTPS_PORT` (default 8443) and `HTTP_PORT` (default 8080, redirects to HTTPS in
@@ -47,6 +57,20 @@ On Docker Desktop (Windows/macOS) connections are NATed, so the audit log record
 gateway address (for example `172.20.0.1`) instead of the PC's IP. On Linux with Docker Engine,
 connections from other machines keep their real source address (connections from the server
 itself to `127.0.0.1` show the Docker gateway).
+
+### Limits in the web proxy
+
+nginx refuses request bodies over 1 MB (12 MB for the switch import upload) and limits each
+client IP to 30 logins per minute and about 20 API requests per second (bursts allowed); excess
+requests get HTTP 413 / 429. The backend enforces the same body limits and its own per-user
+limits. Many users behind one NAT address share the per-IP budget — raise the `rate=` values in
+`frontend/nginx/http.conf` / `https.conf` if that is your situation.
+
+### Docker networks
+
+The containers use two networks: `edge` (nginx and backend; the backend's outbound SSH to the
+switches and HTTPS to NetBox/Zabbix leave through it) and `data` (backend and PostgreSQL, internal
+— no route outside). Nothing but the web ports is published on the host.
 
 ## 2. Connectivity to the switches
 

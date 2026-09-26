@@ -55,9 +55,11 @@ As administrator:
 
 1. **Credentials** — *Settings → Credentials → Add credential*: the switch SSH account (stored
    encrypted, never displayed again).
-2. **Switches** — *Switches → Add switch*: name, management IP, SSH port, credential, location,
-   **topology role** (access / distribution / core), **uplink ports** (e.g. `1/1/49, 1/1/50` or
-   `1/25`). Model and AOS version may be left empty.
+2. **Switches** — *Switches → Add switch*: name, management IP, SSH port, credential, site,
+   location, **topology role** (access / distribution / core), **uplink ports** (e.g.
+   `1/1/49, 1/1/50` or `1/25`), optionally *device locations per port* for MAC operators. Model
+   and AOS version may be left empty. Many switches at once: *Switches → Import* with a CSV/JSON
+   file (credentials referenced by name, never passwords) — [SWITCH_IMPORT_EXPORT.md](SWITCH_IMPORT_EXPORT.md).
 3. **Host key** — on the switch page *Fetch host key*, compare the SHA-256 fingerprint with the
    switch console (`show ssh …` / your records), type its last 8 characters, *Trust this key*.
 4. **Test SSH connection** — runs only `show system`.
@@ -71,7 +73,9 @@ As administrator:
 7. **Test a MAC search** (*MAC Search*) for a known device and compare the switch/port/VLAN with
    the switch CLI.
 8. Create user accounts (*Settings → Users*): READ_ONLY, OPERATOR, ADMIN, and MAC_OPERATOR for
-   non-technical staff.
+   non-technical staff. MAC operators restart devices without asking an administrator, so check
+   the prerequisites in [ADMIN_GUIDE.md § MAC operators](ADMIN_GUIDE.md#mac-operators) (switch
+   role `access`, device locations, maintenance windows).
 
 Optional: NetBox / Zabbix URLs and tokens in `.env`, then `docker compose up -d`; check
 *Settings → Integrations*.

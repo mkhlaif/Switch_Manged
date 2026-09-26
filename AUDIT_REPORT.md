@@ -146,7 +146,8 @@ active sessions and last login. Last active admin cannot be demoted, disabled or
 Separate minimal permission set (`simple_search`, `simple_restart`); only `/api/simple/*`;
 responses carry no technical data; restart only for exactly one ACCESS location with High/Medium
 confidence and every switch reachable; generic user messages; every other API returns 403 and is
-audited as `RBAC_VIOLATION` (HIGH).
+audited as `RBAC_VIOLATION` (HIGH). *(Superseded by the second audit, section 22: location only,
+High confidence on access switches, endpoint evidence gate.)*
 
 ---
 
@@ -251,3 +252,34 @@ had no history before this audit, so there is no historical exposure.
 12. G3 — CI workflow (tests + build).
 13. Keep F3 (Zabbix metrics) and F7 (AOS 8 versions) as documented limitations until lab
     evidence exists; do not guess item keys or command variants.
+
+---
+
+## 22. Second audit (2026-09-26): MAC_OPERATOR direct restart, bulk import/export, full system
+
+Scope: the new requirements (MAC_OPERATOR sees the location only and restarts without
+administrator approval; bulk switch import/export) and a new audit of database, backend, SSH,
+firewall, frontend, Docker/nginx, backup/restore and upgrade. Every finding below was reproduced
+or measured before it was fixed; the fix has a test or a recorded run.
+
+| Id | Severity | Finding | Fix |
+|---|---|---|---|
+| A2-1 | HIGH | SQLite batch migrations rebuild a table with foreign keys enforced: the DROP fired `ON DELETE SET NULL` (upgrade 0003 → 0004 nulled `mac_search_results.switch_id`; older downgrade paths affected too) | migrations run with SQLite FK enforcement off and end with `PRAGMA foreign_key_check`; test keeps references on upgrade and downgrade |
+| A2-2 | HIGH | Restore with `pg_restore --clean` over an upgraded database left a mixed old/new schema (new tables kept, `users` not restored) — the documented rollback silently produced inconsistent data | restore into a fresh database, swap only on success, keep the previous database; rollback procedure re-tested on PostgreSQL |
+| A2-3 | HIGH (test evidence) | With FastAPI 0.141 included routers are nested objects: the tests "every route is authenticated" and "no request model accepts command text" enumerated 2 routes and were vacuous | recursive route enumeration with a minimum-count guard; 81 endpoints / 21 request bodies now checked (all pass) |
+| A2-4 | MEDIUM | MAC_OPERATOR restart accepted Medium confidence, switches of unknown role, no explicit port-state / VLAN / LLDP / MAC-count evidence, no NetBox evidence; "success" even when the MAC came back in another VLAN; the UI showed the switch name | endpoint evidence gate (re-run before the change), High confidence on `access` switches only, NetBox fail-closed, VLAN re-check against the search, strict post-restart `verified`, location-only responses |
+| A2-5 | MEDIUM | A link bounce on an administratively disabled port would enable it (a configuration change) — any role | refused for every role |
+| A2-6 | MEDIUM | Backend buffered request bodies of any size before authentication; nginx allowed only 1 MB (would break the new import) and had no rate limit | body-size middleware (413) before routing; nginx per-location body sizes and `limit_req` zones |
+| A2-7 | MEDIUM | `restore.ps1` aborted half-way when its output was redirected (PowerShell 5.1 turns docker's stderr into errors) and left backend/frontend stopped; `restore.sh` left them stopped on failure | exit-code based docker calls; services always restarted (`finally` / `trap`) |
+| A2-8 | MEDIUM | `create-user --password-stdin` kept the CR of PowerShell pipes: the created admin could never log in (reproduced on the published version) | strip CR/LF and BOM; test |
+| A2-9 | MEDIUM | Audit write could fail on PostgreSQL for over-long username / switch / label / IP values (request failed, no audit entry) | every field bounded; oversized JSON truncated with a marker |
+| A2-10 | MEDIUM | nginx master ran as root; no `no-new-privileges`, capability drop or resource limits; the web proxy could reach PostgreSQL | `nginx-unprivileged`, hardening options, memory/PID limits, `edge` / internal `data` networks |
+| A2-11 | LOW | No database pool/statement/idle-in-transaction limits | bounded pool and timeouts (configurable) |
+| A2-12 | LOW | Full-table scans: case-insensitive duplicate checks (4 ms each at 8 000 switches), topology (76 ms) and dashboard (123 ms) at 1 M search results, switch delete 180 ms | measured indexes: `lower(name)`, `(lower(host), ssh_port)` (also enforce case-insensitive uniqueness), `(status, created_at)`, `switch_id` → 4.7 ms / 0.15 ms / 57 ms |
+| A2-13 | LOW | No rate limit on NetBox reconciliation (any READ_ONLY user could trigger one NetBox request per switch repeatedly), exports, switch detect / host-key fetch, lab verification | per-user limits |
+| A2-14 | LOW | Concurrent duplicate user creation returned 500 | 409 from the UNIQUE constraint |
+| A2-15 | LOW | Invisible characters (backspace, CR, BOM) introduced into source/docs by editing tools | fixed; repository scanner run before every commit |
+| A2-16 | LOW | Docs: Windows guide said the password is typed twice; UPGRADE rollback order could not work after a schema change | corrected and re-tested |
+
+Unchanged by design (documented): no MFA/SSO, one backend process, commands not yet executed on
+real OmniSwitch hardware. Full results: [FINAL_PROJECT_REPORT.md](FINAL_PROJECT_REPORT.md).

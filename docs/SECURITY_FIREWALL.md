@@ -73,7 +73,8 @@ use `extra="forbid"`, so unknown fields cause a 422 and are never silently ignor
 "Allowed roles" is the firewall's own check. Which *API* a role may call is decided separately by
 the permission model (see [SECURITY.md](SECURITY.md#3-rbac)): a `mac_operator`, for example, can reach
 `SEARCH_MAC` and `RESTART_PORT` only through the simplified `/api/simple` endpoints, and only
-for a confidently classified ACCESS port.
+for a High-confidence ACCESS port on an access switch that passes the endpoint evidence gate
+([SECURITY.md § 4](SECURITY.md#4-mac_operator-direct-endpoint-restart)).
 
 Explicitly denied, and recorded as security events when requested:
 
@@ -141,8 +142,9 @@ admin state has been read back (see §5).
    - the plan must belong to this user and must not have expired;
    - the confirmation must match exactly: `RESTART PORT <port>` (plus
      `I UNDERSTAND THIS IS A TRUNK` for an EMERGENCY trunk override). The simplified
-     `mac_operator` flow has no typed phrase, but it is limited to confidently classified ACCESS
-     ports;
+     `mac_operator` flow has no typed phrase and no administrator approval, but it is limited to
+     High-confidence ACCESS ports on access switches that pass the endpoint evidence gate (re-run
+     immediately before the change);
    - the safety state must allow it: MAINTENANCE mode (EMERGENCY for administrators), no kill
      switch, no SAFE MODE. Otherwise the result is PORT RESTART BLOCKED, and the safety test
      report is stored;
@@ -173,7 +175,9 @@ Classification policy:
 
 | Port | MAC_OPERATOR | OPERATOR | ADMIN |
 |---|---|---|---|
-| ACCESS (High/Medium confidence) | yes, simple confirmation | `RESTART PORT <port>` | `RESTART PORT <port>` |
+| ACCESS, High confidence, access switch, endpoint evidence gate passed | yes, simple confirmation | `RESTART PORT <port>` | `RESTART PORT <port>` |
+| ACCESS otherwise (Medium confidence, switch role not `access`, gate failed) | no | `RESTART PORT <port>` | `RESTART PORT <port>` |
+| administratively disabled port | no | no | no (a bounce would enable it) |
 | LIKELY_ACCESS | no | phrase + warning | phrase + warning |
 | UNKNOWN | no | no | no (fail closed) |
 | TRUNK / LIKELY_TRUNK, or any port of a core/distribution switch | no | no | EMERGENCY mode only: HIGH RISK + two phrases |
