@@ -1,0 +1,106 @@
+# OmniSwitch MAC Locator — production-style deployment.
+#
+#   cp .env.example .env      # then fill in the secrets
+#   docker compose up -d --build
+#   docker compose exec backend python -m app.cli create-user --role admin <name>
+#
+# Lab mode (simulated switches, including a real SSH simulator):
+#   ENABLE_SIMULATOR=true in .env, then
+#   docker compose --profile lab up -d --build
+#   docker compose exec backend python -m app.cli seed-lab
+#
+# Redis is intentionally NOT used: one backend process owns search jobs, the SSH concurrency
+# limit and live progress (see README "Why no Redis").
+
+name: omniswitch-mac-locator
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-netops}
+      POSTGRES_USER: ${POSTGRES_USER:-netops}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+
+  backend:
+    build: ./backend
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      ENVIRONMENT: production
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-netops}:${POSTGRES_PASSWORD}@postgres:5432/${POSTGRES_DB:-netops}
+      CREDENTIAL_ENCRYPTION_KEY: ${CREDENTIAL_ENCRYPTION_KEY:?Set CREDENTIAL_ENCRYPTION_KEY in .env}
+      COOKIE_SECURE: ${COOKIE_SECURE:-true}
+      SESSION_TTL_MINUTES: ${SESSION_TTL_MINUTES:-480}
+      INITIAL_ADMIN_USERNAME: ${INITIAL_ADMIN_USERNAME:-}
+      INITIAL_ADMIN_PASSWORD: ${INITIAL_ADMIN_PASSWORD:-}
+      MAX_CONCURRENT_SSH: ${MAX_CONCURRENT_SSH:-5}
+      SSH_TIMEOUT: ${SSH_TIMEOUT:-10}
+      SSH_LOGIN_TIMEOUT: ${SSH_LOGIN_TIMEOUT:-20}
+      COMMAND_TIMEOUT: ${COMMAND_TIMEOUT:-15}
+      SSH_MAX_SESSION_SECONDS: ${SSH_MAX_SESSION_SECONDS:-300}
+      SSH_CONNECT_RETRIES: ${SSH_CONNECT_RETRIES:-1}
+      SSH_SWITCH_BUDGET_SECONDS: ${SSH_SWITCH_BUDGET_SECONDS:-120}
+      SSH_ALLOW_UNKNOWN_HOST_KEYS: ${SSH_ALLOW_UNKNOWN_HOST_KEYS:-false}
+      ENABLE_SIMULATOR: ${ENABLE_SIMULATOR:-false}
+      DEFAULT_DRY_RUN: ${DEFAULT_DRY_RUN:-true}
+      # Command Safety Firewall: read-only by default (RESTART_PORT blocked) until you opt in.
+      READ_ONLY_MODE: ${READ_ONLY_MODE:-true}
+      # DISABLED forces the kill switch (STOP ALL NETWORK OPERATIONS) regardless of the UI.
+      NETWORK_COMMAND_EXECUTION: ${NETWORK_COMMAND_EXECUTION:-ENABLED}
+      CIRCUIT_BREAKER_THRESHOLD: ${CIRCUIT_BREAKER_THRESHOLD:-5}
+      # Read-only integrations (optional). Use read-only API tokens.
+      NETBOX_URL: ${NETBOX_URL:-}
+      NETBOX_TOKEN: ${NETBOX_TOKEN:-}
+      NETBOX_VERIFY_TLS: ${NETBOX_VERIFY_TLS:-true}
+      ZABBIX_URL: ${ZABBIX_URL:-}
+      ZABBIX_TOKEN: ${ZABBIX_TOKEN:-}
+      ZABBIX_VERIFY_TLS: ${ZABBIX_VERIFY_TLS:-true}
+      INTEGRATION_TIMEOUT: ${INTEGRATION_TIMEOUT:-10}
+      LOG_LEVEL: ${LOG_LEVEL:-INFO}
+      LOG_FORMAT: ${LOG_FORMAT:-text}
+    # Not published: only reachable through the frontend reverse proxy.
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/api/health', timeout=3)"]
+      interval: 10s
+      timeout: 5s
+      retries: 12
+      start_period: 20s
+    # Give running port actions time to finish (send "up" + verify) on shutdown.
+    stop_grace_period: 90s
+
+  frontend:
+    build: ./frontend
+    restart: unless-stopped
+    depends_on:
+      backend:
+        condition: service_healthy
+    environment:
+      NGINX_SITE: ${NGINX_SITE:-http.conf}
+    ports:
+      - "${HTTP_PORT:-8080}:8080"
+      - "${HTTPS_PORT:-8443}:8443"
+    volumes:
+      # For NGINX_SITE=https.conf place tls.crt and tls.key in ./certs
+      - ./certs:/etc/nginx/certs:ro
+
+  # Lab only: simulated OmniSwitches reachable over REAL SSH (host sim-ssh, ports 2201-2207,
+  # user lab / lab-password). Never enable on a production network.
+  sim-ssh:
+    build: ./backend
+    profiles: ["lab"]
+    restart: unless-stopped
+    command: ["python", "-m", "app.simulator.ssh_server", "--host", "0.0.0.0", "--base-port", "2201", "--key", "/tmp/sim_host_key"]
+
+volumes:
+  pgdata:
