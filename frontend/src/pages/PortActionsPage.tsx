@@ -29,6 +29,7 @@ export default function PortActionsPage() {
         <div className="flex gap-3 border-b border-slate-200 p-3 dark:border-slate-800">
           <Select
             className="w-52"
+            aria-label="Filter by status"
             value={status}
             onChange={(e) => {
               setOffset(0);

@@ -19,9 +19,9 @@ export function SafetyIndicatorBadge({ indicator, compact }: { indicator: Safety
   const style = INDICATOR_STYLE[indicator];
   const Icon = ICON[indicator];
   return (
-    <div className={cx("rounded-lg px-3 py-2", style.className)} title={style.description} role="status" aria-label={`Network safety: ${indicator}`} data-testid="safety-indicator">
+    <div className={cx("rounded-lg", compact ? "whitespace-nowrap px-2 py-1" : "px-3 py-2", style.className)} title={style.description} role="status" aria-label={`Network safety: ${indicator}`} data-testid="safety-indicator">
       {!compact && <div className="text-[10px] font-semibold uppercase tracking-widest opacity-80">Network safety</div>}
-      <div className="flex items-center gap-1.5 text-sm font-bold uppercase">
+      <div className={cx("flex items-center gap-1.5 font-bold uppercase", compact ? "text-xs" : "text-sm")}>
         <Icon className="h-4 w-4" />
         {indicator === "SAFE MODE" ? "⚠ " : "● "}
         {indicator}

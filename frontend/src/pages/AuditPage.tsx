@@ -69,7 +69,7 @@ function AuditTable() {
             setFilters(draft);
           }}
         >
-          <Select className="w-56" value={draft.action} onChange={(e) => setDraft({ ...draft, action: e.target.value })}>
+          <Select className="w-56" aria-label="Filter by action" value={draft.action} onChange={(e) => setDraft({ ...draft, action: e.target.value })}>
             <option value="">All actions</option>
             {data?.actions.map((a) => (
               <option key={a} value={a}>
@@ -77,14 +77,14 @@ function AuditTable() {
               </option>
             ))}
           </Select>
-          <Select className="w-36" value={draft.severity} onChange={(e) => setDraft({ ...draft, severity: e.target.value })}>
+          <Select className="w-36" aria-label="Filter by severity" value={draft.severity} onChange={(e) => setDraft({ ...draft, severity: e.target.value })}>
             <option value="">All severities</option>
             <option>INFO</option>
             <option>WARNING</option>
             <option>HIGH</option>
             <option>CRITICAL</option>
           </Select>
-          <Select className="w-36" value={draft.result} onChange={(e) => setDraft({ ...draft, result: e.target.value })}>
+          <Select className="w-36" aria-label="Filter by result" value={draft.result} onChange={(e) => setDraft({ ...draft, result: e.target.value })}>
             <option value="">All results</option>
             <option>SUCCESS</option>
             <option>FAILED</option>
@@ -242,6 +242,7 @@ function SessionsTable() {
         <div className="flex gap-3 border-b border-slate-200 p-3 dark:border-slate-800">
           <Select
             className="w-52"
+            aria-label="Filter SSH sessions by result"
             value={result}
             onChange={(e) => {
               setOffset(0);

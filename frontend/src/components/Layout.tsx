@@ -98,48 +98,51 @@ export default function Layout() {
       </aside>
 
       <div className="flex min-w-0 flex-1 flex-col">
-        <header className="flex h-14 shrink-0 items-center justify-between gap-3 border-b border-slate-200 bg-white/80 px-4 backdrop-blur dark:border-slate-800 dark:bg-slate-900/80 md:px-6">
-          <nav className="flex gap-1 overflow-x-auto md:hidden">
+        <header className="shrink-0 border-b border-slate-200 bg-white/80 px-4 backdrop-blur dark:border-slate-800 dark:bg-slate-900/80 md:px-6">
+          <div className="flex h-14 items-center justify-between gap-3">
+            <div className="flex min-w-0 items-center gap-2">
+              <div className="md:hidden">
+                <SafetyIndicatorBadge indicator={flags?.indicator ?? null} compact />
+              </div>
+              {flags && !flags.firewallReady && (
+                <Badge tone="red" className="uppercase">
+                  <ShieldAlert className="h-3 w-3" /> <span className="hidden sm:inline">Safety firewall failed — all commands blocked</span>
+                  <span className="sm:hidden">Firewall failed</span>
+                </Badge>
+              )}
+              {flags && (
+                <span className="hidden text-xs text-slate-500 lg:inline">
+                  Mode <span className="font-semibold text-slate-700 dark:text-slate-200">{flags.mode}</span>
+                  {flags.dryRun && <> · <span className="font-semibold text-sky-700 dark:text-sky-400">dry run</span></>}
+                </span>
+              )}
+              {flags?.lab && (
+                <Badge tone="violet" className="uppercase">
+                  <FlaskConical className="h-3 w-3" /> Lab<span className="hidden sm:inline"> mode</span>
+                </Badge>
+              )}
+              {flags?.unknownKeys && <Badge tone="red">Host-key checking disabled</Badge>}
+            </div>
+            <div className="flex shrink-0 items-center gap-2">
+              <button onClick={toggleTheme} className="rounded-lg p-2 text-slate-500 hover:bg-slate-100 dark:hover:bg-slate-800" aria-label="Toggle theme">
+                {dark ? <Sun className="h-4 w-4" /> : <Moon className="h-4 w-4" />}
+              </button>
+              <div className="hidden text-right leading-tight sm:block">
+                <div className="text-sm font-medium">{user?.full_name || user?.username}</div>
+                <div className="text-[11px] uppercase tracking-wide text-slate-500">{user?.role}</div>
+              </div>
+              <button onClick={logout} className="rounded-lg p-2 text-slate-500 hover:bg-slate-100 dark:hover:bg-slate-800" aria-label="Sign out" title="Sign out">
+                <LogOut className="h-4 w-4" />
+              </button>
+            </div>
+          </div>
+          <nav className="-mx-1 flex gap-1 overflow-x-auto pb-2 md:hidden" aria-label="Main">
             {nav.map(({ to, icon: Icon, end, label }) => (
-              <NavLink key={to} to={to} end={end} aria-label={label} className={({ isActive }) => cx("rounded-md p-2", isActive ? "bg-teal-50 text-teal-700 dark:bg-teal-500/10" : "text-slate-500")}>
+              <NavLink key={to} to={to} end={end} aria-label={label} title={label} className={({ isActive }) => cx("shrink-0 rounded-md p-2", isActive ? "bg-teal-50 text-teal-700 dark:bg-teal-500/10" : "text-slate-500")}>
                 <Icon className="h-4 w-4" />
               </NavLink>
             ))}
           </nav>
-          <div className="flex flex-wrap items-center gap-2">
-            <div className="md:hidden">
-              <SafetyIndicatorBadge indicator={flags?.indicator ?? null} compact />
-            </div>
-            {flags && !flags.firewallReady && (
-              <Badge tone="red" className="uppercase">
-                <ShieldAlert className="h-3 w-3" /> Safety firewall failed — all commands blocked
-              </Badge>
-            )}
-            {flags && (
-              <span className="hidden text-xs text-slate-500 lg:inline">
-                Mode <span className="font-semibold text-slate-700 dark:text-slate-200">{flags.mode}</span>
-                {flags.dryRun && <> · <span className="font-semibold text-sky-700 dark:text-sky-400">dry run</span></>}
-              </span>
-            )}
-            {flags?.lab && (
-              <Badge tone="violet" className="uppercase">
-                <FlaskConical className="h-3 w-3" /> Lab mode
-              </Badge>
-            )}
-            {flags?.unknownKeys && <Badge tone="red">Host-key checking disabled</Badge>}
-          </div>
-          <div className="flex items-center gap-2">
-            <button onClick={toggleTheme} className="rounded-lg p-2 text-slate-500 hover:bg-slate-100 dark:hover:bg-slate-800" aria-label="Toggle theme">
-              {dark ? <Sun className="h-4 w-4" /> : <Moon className="h-4 w-4" />}
-            </button>
-            <div className="hidden text-right leading-tight sm:block">
-              <div className="text-sm font-medium">{user?.full_name || user?.username}</div>
-              <div className="text-[11px] uppercase tracking-wide text-slate-500">{user?.role}</div>
-            </div>
-            <button onClick={logout} className="rounded-lg p-2 text-slate-500 hover:bg-slate-100 dark:hover:bg-slate-800" aria-label="Sign out" title="Sign out">
-              <LogOut className="h-4 w-4" />
-            </button>
-          </div>
         </header>
         <main className="min-w-0 flex-1 overflow-y-auto px-4 py-6 md:px-8">
           <div className="mx-auto max-w-[1600px]">

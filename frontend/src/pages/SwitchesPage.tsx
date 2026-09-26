@@ -47,7 +47,7 @@ export default function SwitchesPage() {
             <Search className="pointer-events-none absolute top-2.5 left-3 h-4 w-4 text-slate-400" />
             <Input className="pl-9" placeholder="Filter by name, IP, model, AOS, location…" value={q} onChange={(e) => setQ(e.target.value)} />
           </div>
-          <Select className="w-44" value={status} onChange={(e) => setStatus(e.target.value)}>
+          <Select className="w-44" aria-label="Filter by status" value={status} onChange={(e) => setStatus(e.target.value)}>
             <option value="">All statuses</option>
             <option value="online">Online</option>
             <option value="offline">Offline</option>
