@@ -28,33 +28,51 @@ version, never guessed.
 
 ## AOS 8 (`AOS8`)
 
-| Operation | Key | Command | R/W | Expected output (contract) | Parser | Level | Source |
-|---|---|---|---|---|---|---|---|
-| discovery | `system_info` | `show system` | read | contains `Description:` | system parser | doc_example | [A8] p.61-56 |
-| SEARCH_MAC | `mac_lookup` | `show mac-learning mac-address {mac}` | read | `Mac Address` / `Total number of Valid MAC` | mac_table_parser | doc_syntax | [A8] p.4-41 |
-| GET_PORT_MACS | `mac_on_port` | `show mac-learning port {port}` | read | same as above | mac_table_parser | doc_syntax | [A8] p.4-41 |
-| GET_PORT_VLAN | `vlan_port` | `show vlan members port {port}` | read | header `vlan type status` | vlan_port_parser | doc_example | [A8] p.5-13 |
-| GET_PORT_VLAN | `vlan_linkagg` | `show vlan members linkagg {agg}` | read | header `vlan type status` | vlan_port_parser | doc_syntax | [A8] p.5-13 |
-| GET_PORT_STATUS | `port_detail` | `show interfaces port {port}` | read | `Operational Status` | port_status_parser | doc_example | [A8] p.1-59 |
-| GET_PORT_STATUS | `port_admin` | `show interfaces port {port} alias` | read | header `Admin Link` | port_admin_parser | doc_example | [A8] p.1-63 |
-| GET_LLDP | `lldp_port` | `show lldp port {port} remote-system` | read | `Remote LLDP` (empty = no neighbour) | lldp_parser | doc_syntax | [A8] p.18-63 |
-| RESTART_PORT (link bounce) | `INTERFACE_ADMIN_STATE` | `interfaces port {port} admin-state disable` → `… enable` | **write** | no output | — | doc_syntax | [A8] p.1-3 |
-| RESTART_PORT (PoE cycle) | `LANPOWER_ADMIN_STATE` | `lanpower port {port} admin-state disable` → `… enable` | **write** | no output | — | doc_example | [A8] p.2-4 — not on OS6570M, OS6900; PoE models only |
+**Applies to:** OS6360, OS6465, OS6560, OS6570M, OS6860, OS6860N, OS6865, OS6900, OS9900 on AOS 8.x (documentation reviewed: 8.10R1). Ports `chassis/slot/port`.
+
+| Operation | Key | Command | Risk | Expected prompt | Expected output (contract) | Parser | Level | Source |
+|---|---|---|---|---|---|---|---|---|
+| discovery | `system_info` | `show system` | READ_ONLY | `… ->` | contains `Description:` | system parser | doc_example | [A8] p.61-56 |
+| SEARCH_MAC | `mac_lookup` | `show mac-learning mac-address {mac}` | READ_ONLY | `… ->` | `Mac Address` / `Total number of Valid MAC` | mac_table_parser | doc_syntax | [A8] p.4-41 |
+| GET_PORT_MACS | `mac_on_port` | `show mac-learning port {port}` | READ_ONLY | `… ->` | same as above | mac_table_parser | doc_syntax | [A8] p.4-41 |
+| GET_PORT_VLAN | `vlan_port` | `show vlan members port {port}` | READ_ONLY | `… ->` | header `vlan type status` | vlan_port_parser | doc_example | [A8] p.5-13 |
+| GET_PORT_VLAN | `vlan_linkagg` | `show vlan members linkagg {agg}` | READ_ONLY | `… ->` | header `vlan type status` | vlan_port_parser | doc_syntax | [A8] p.5-13 |
+| GET_PORT_STATUS | `port_detail` | `show interfaces port {port}` | READ_ONLY | `… ->` | `Operational Status` | port_status_parser | doc_example | [A8] p.1-59 |
+| GET_PORT_STATUS | `port_admin` | `show interfaces port {port} alias` | READ_ONLY | `… ->` | header `Admin Link` | port_admin_parser | doc_example | [A8] p.1-63 |
+| GET_LLDP | `lldp_port` | `show lldp port {port} remote-system` | READ_ONLY | `… ->` | `Remote LLDP` (empty = no neighbour) | lldp_parser | doc_syntax | [A8] p.18-63 |
+| RESTART_PORT (link bounce) | `INTERFACE_ADMIN_STATE` | `interfaces port {port} admin-state disable` → `… enable` | **STATE_CHANGING** | `… ->` | no output | — | doc_syntax | [A8] p.1-3 |
+| RESTART_PORT (PoE cycle) | `LANPOWER_ADMIN_STATE` | `lanpower port {port} admin-state disable` → `… enable` | **STATE_CHANGING** | `… ->` | no output | — | doc_example | [A8] p.2-4 — not on OS6570M, OS6900; PoE models only |
 
 ## AOS 6 (`AOS6`)
 
-| Operation | Key | Command | R/W | Expected output (contract) | Parser | Level | Source |
-|---|---|---|---|---|---|---|---|
-| discovery | `system_info` | `show system` | read | contains `Description:` | system parser | doc_example | [A6] p.2-31 |
-| SEARCH_MAC | `mac_lookup` | `show mac-address-table {mac}` | read | `Mac Address` / `Total number of Valid MAC` | mac_table_parser | doc_syntax | [A6] p.20-10 |
-| GET_PORT_MACS | `mac_on_port` | `show mac-address-table {port}` | read | same as above | mac_table_parser | doc_syntax — **no literal example in the guide; lab-verify** | [A6] p.20-10 |
-| GET_PORT_VLAN | `vlan_port` | `show vlan port {port}` | read | header `vlan type status` | vlan_port_parser | doc_example | [A6] p.25-15 |
-| GET_PORT_VLAN | `vlan_linkagg` | `show vlan port {agg}` | read | header `vlan type status` | vlan_port_parser | doc_syntax | [A6] p.25-15 |
-| GET_PORT_STATUS | `port_detail` | `show interfaces {port}` | read | `Operational Status` | port_status_parser | doc_example | [A6] p.23-49 |
-| GET_PORT_STATUS | `port_admin` | `show interfaces {port} port` | read | header `Admin Link` | port_admin_parser | doc_example | [A6] p.23-79 |
-| GET_LLDP | `lldp_port` | `show lldp {port} remote-system` | read | `Remote LLDP` (empty = no neighbour) | lldp_parser | doc_syntax | [A6] p.13-47 |
-| RESTART_PORT (link bounce) | `INTERFACE_ADMIN` | `interfaces {port} admin down` → `… admin up` | **write** | no output | — | doc_example | [A6] p.23-15 |
-| RESTART_PORT (PoE cycle) | `LANPOWER_STOP_START` | `lanpower stop {port}` → `lanpower start {port}` | **write** | no output | — | doc_example | [A6] p.4-2, p.4-4 — PoE models only |
+**Applies to:** OS6250, OS6350, OS6450 on AOS 6.6 / 6.7 (documentation reviewed: 6.7.1). Ports `slot/port`.
+
+| Operation | Key | Command | Risk | Expected prompt | Expected output (contract) | Parser | Level | Source |
+|---|---|---|---|---|---|---|---|---|
+| discovery | `system_info` | `show system` | READ_ONLY | `… ->` | contains `Description:` | system parser | doc_example | [A6] p.2-31 |
+| SEARCH_MAC | `mac_lookup` | `show mac-address-table {mac}` | READ_ONLY | `… ->` | `Mac Address` / `Total number of Valid MAC` | mac_table_parser | doc_syntax | [A6] p.20-10 |
+| GET_PORT_MACS | `mac_on_port` | `show mac-address-table {port}` | READ_ONLY | `… ->` | same as above | mac_table_parser | doc_syntax — **no literal example in the guide; lab-verify** | [A6] p.20-10 |
+| GET_PORT_VLAN | `vlan_port` | `show vlan port {port}` | READ_ONLY | `… ->` | header `vlan type status` | vlan_port_parser | doc_example | [A6] p.25-15 |
+| GET_PORT_VLAN | `vlan_linkagg` | `show vlan port {agg}` | READ_ONLY | `… ->` | header `vlan type status` | vlan_port_parser | doc_syntax | [A6] p.25-15 |
+| GET_PORT_STATUS | `port_detail` | `show interfaces {port}` | READ_ONLY | `… ->` | `Operational Status` | port_status_parser | doc_example | [A6] p.23-49 |
+| GET_PORT_STATUS | `port_admin` | `show interfaces {port} port` | READ_ONLY | `… ->` | header `Admin Link` | port_admin_parser | doc_example | [A6] p.23-79 |
+| GET_LLDP | `lldp_port` | `show lldp {port} remote-system` | READ_ONLY | `… ->` | `Remote LLDP` (empty = no neighbour) | lldp_parser | doc_syntax | [A6] p.13-47 |
+| RESTART_PORT (link bounce) | `INTERFACE_ADMIN` | `interfaces {port} admin down` → `… admin up` | **STATE_CHANGING** | `… ->` | no output | — | doc_example | [A6] p.23-15 |
+| RESTART_PORT (PoE cycle) | `LANPOWER_STOP_START` | `lanpower stop {port}` → `lanpower start {port}` | **STATE_CHANGING** | `… ->` | no output | — | doc_example | [A6] p.4-2, p.4-4 — PoE models only |
+
+## Expected prompt, pagers and timeouts
+
+Every command is sent on an interactive SSH shell and is complete only when the switch prompt
+returns:
+
+- **Prompt:** must match `->` at the end of the line (AOS default `->`, or `<system name> ->`,
+  e.g. `SW-ACCESS-01 ->`). The exact prompt seen after login is learned and then required for
+  every later command in the session.
+- **Pagers** are answered automatically: AOS 6 `More? [next screen <sp>, next line <cr>, filter
+  pattern </>, quit </>]`, `--More--`, `More?`, `Press any key to continue`.
+- **Errors:** any line starting with `ERROR:` makes the command fail (nothing is guessed).
+- **Timeouts:** `COMMAND_TIMEOUT` per command (default 15 s), `SSH_MAX_SESSION_SECONDS` per
+  session (default 300 s), at most 60 commands per session.
 
 ## How a command is used
 

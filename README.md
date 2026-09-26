@@ -114,6 +114,56 @@ Needs Git and Docker (Docker Desktop on Windows, Docker Engine on Linux). Exact 
 14. Run the lab verification for each model family/AOS version (*Settings → Command profiles*).
 15. Only then enable restart operations — see [Production enablement](#production-enablement).
 
+## Running on another computer
+
+Everything needed is in the repository; nothing depends on the developer's machine. A fresh
+installation starts **read-only** (`READ_ONLY_MODE=true`, `NETWORK_COMMAND_EXECUTION=DISABLED`).
+
+### Linux (Ubuntu 22.04+, Docker Engine + Compose plugin installed — see [docs/LINUX_SETUP.md](docs/LINUX_SETUP.md))
+
+```bash
+git clone https://github.com/mkhlaif/Switch_Manged.git
+cd Switch_Manged
+./scripts/init-env.sh                     # creates .env with a generated DB password and encryption key
+docker compose up -d --build              # PostgreSQL, backend (runs DB migrations), nginx
+docker compose ps                         # wait until all services are "healthy"
+docker compose exec backend python -m app.cli create-user --role admin admin
+curl -fsS http://127.0.0.1:8080/health    # {"status":"healthy","database":"ok",...}
+```
+
+### Windows PowerShell (Git for Windows + Docker Desktop installed — see [docs/WINDOWS_SETUP.md](docs/WINDOWS_SETUP.md))
+
+```powershell
+git clone https://github.com/mkhlaif/Switch_Manged.git
+cd Switch_Manged
+powershell -ExecutionPolicy Bypass -File .\scripts\init-env.ps1
+docker compose up -d --build
+docker compose ps
+docker compose exec backend python -m app.cli create-user --role admin admin
+Invoke-RestMethod http://127.0.0.1:8080/health
+```
+
+### Then
+
+- **Browser:** `http://localhost:8080` on the same machine.
+- **`.env`:** created by the init script from `.env.example`; never commit it. Back up
+  `CREDENTIAL_ENCRYPTION_KEY` securely.
+- **Database:** PostgreSQL runs in Docker (volume `pgdata`); migrations run automatically at
+  every backend start — no manual SQL.
+- **HTTPS and LAN access:** put `tls.crt`/`tls.key` into `./certs`, set `NGINX_SITE=https.conf` and
+  `BIND_ADDRESS=<server LAN IP>`, open the port in the firewall, `docker compose up -d`; users
+  open `https://SERVER-IP:8443` ([docs/NETWORK_SETUP.md](docs/NETWORK_SETUP.md)).
+- **Switches:** *Settings → Credentials* (SSH account, stored encrypted), *Switches → Add switch*,
+  then on the switch page *Fetch host key* → compare the fingerprint with the switch → *Trust*,
+  *Test SSH connection*, *Detect model / AOS* (TCP/22 from the server to the switches).
+- **Enabling network execution — only after the lab verification**
+  ([docs/DEPLOYMENT.md](docs/DEPLOYMENT.md#5-production-enablement)): in `.env` set
+  `READ_ONLY_MODE=false` and `NETWORK_COMMAND_EXECUTION=ENABLED`, `docker compose up -d`, then
+  *Safety Controls → Maintenance* and *Settings → Port actions → dry run off*.
+- **Backup / restore / upgrade:** `./scripts/backup.sh` (`.\scriptsackup.ps1`),
+  `./scripts/restore.sh <file>` (`.\scriptsestore.ps1 -File <file>`), and
+  [docs/UPGRADE.md](docs/UPGRADE.md) (backup → `git pull` → `docker compose up -d --build`).
+
 ## Installation
 
 - Windows 10/11: [docs/WINDOWS_SETUP.md](docs/WINDOWS_SETUP.md)
