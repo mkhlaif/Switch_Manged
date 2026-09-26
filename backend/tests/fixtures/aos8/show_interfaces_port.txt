@@ -1,0 +1,30 @@
+Chassis/Slot/Port  1/1/2 :
+ Operational Status     : up,
+ Last Time Link Changed : Mon Jan  5 17:09:30 2019,
+ Number of Status Change: 1,
+ Port-Down/Violation Reason: None,
+ Type                   : Ethernet,
+ SFP/XFP                : GBIC_SX,
+ Interface Type         : Fiber,
+ EPP                    : Disabled,
+ Link-Quality           : Good
+ MAC address            : 00:d0:95:b2:39:85,
+ BandWidth (Megabits)   :     1000,         Duplex           : Full,
+ Autonegotiation        :   1  [ 1000-F 100-F 100-H 10-F 10-H ],
+ Long Accept            : Enable,           Runt Accept      : Disable,
+ Long Frame Size(Bytes) : 9216,             Runt Size(Bytes) : 64,
+ Inter Frame Gap(Bytes) : 12,
+ loopback mode          : N/A,
+ Rx              :
+ Bytes Received  :           7967624, Unicast Frames :                 0,
+ Broadcast Frames:            124186, M-cast Frames  :               290,
+ UnderSize Frames:                 0, OverSize Frames:                 0,
+ Lost Frames     :                 0, Error Frames   :                 3,
+ CRC Error Frames:                 2, Alignments Err :                 0,
+ Tx              :
+ Bytes Xmitted   :         255804426, Unicast Frames :             24992,
+ Broadcast Frames:           3178399, M-cast Frames  :            465789,
+ UnderSize Frames:                 0, OverSize Frames:                 0,
+ Lost Frames     :                 0, Collided Frames:                 0,
+ Error Frames    :                 0, Collisions     :                 0,
+ Late Collisions :                 0, Exc-Collisions :                 0

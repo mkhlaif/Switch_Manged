@@ -1,0 +1,9 @@
+System:
+  Description:  Alcatel-Lucent OS6250-24 6.6.2.63.R02 February 21, 2010.,
+  Object ID:    1.3.6.1.4.1.6486.800.1.1.2.1.6.1.2,
+  Up Time:      0 days 5 hours 20 minutes and 49 seconds,
+  Contact:      Alcatel-Lucent, www.alcatel-lucent.com/enterprise/en,
+  Name:         OmniSwitch 6250,
+  Location:     NMS_LABORATORY,
+  Services:     72,
+  Date & Time:  WED MAR 03 2010 16:07:59 (UTC)

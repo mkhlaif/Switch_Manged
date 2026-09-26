@@ -1,0 +1,18 @@
+Remote LLDP nearest-bridge Agents on Local Port 1/1/12:
+
+    Chassis 00:80:9f:12:12:12, Port 00:80:9f:12:12:12:
+      Remote ID                   = 3,
+      Chassis Subtype             = 4 (MAC Address),
+      Port Subtype                = 3 (MAC address),
+      System Name                 = ALE-8068s,
+      System Description          = ALE-8068s Premium DeskPhone,
+      Capabilities Supported      = Bridge, Telephone,
+      Capabilities Enabled        = Telephone,
+      Management IP Address       = 10.30.0.12,
+
+    Chassis 3c:52:82:aa:bb:cc, Port 3c:52:82:aa:bb:cc:
+      Remote ID                   = 4,
+      Chassis Subtype             = 4 (MAC Address),
+      System Name                 = PC-204,
+      Capabilities Supported      = Station Only,
+      Capabilities Enabled        = Station Only,

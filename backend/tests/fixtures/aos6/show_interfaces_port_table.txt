@@ -1,0 +1,7 @@
+Legends: * - Permanent Shutdown
+
+Slot/    Admin     Link    Violations   Recovery   Recovery  Alias
+Port     Status   Status                  Time        Max
+------+----------+---------+----------+----------+----------+----------
+ 1/1     enable     down       none        300          1      ""
+ 1/26    enable     up         none        300          1      "Room 204 PC"

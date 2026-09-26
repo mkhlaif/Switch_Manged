@@ -1,0 +1,8 @@
+   vlan     type      status
++------+----------+------------+
+     1   default     forwarding
+     2   qtagged     forwarding
+     5   dynamic     blocking
+     3   qtagged     blocking
+     7   mobile      forwarding
+     8   vstkQtag    forwarding

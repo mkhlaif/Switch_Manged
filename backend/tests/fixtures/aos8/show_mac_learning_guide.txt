@@ -1,0 +1,15 @@
+Legend: Mac Address: * = address not valid,
+        Mac Address: & = duplicate static address,
+        ID = ISID/Vnid/vplsid
+
+ Domain    Vlan/SrvcId/[ISId/vnID]    Mac Address           Type          Operation          Interface
+------+----------------------+-------------------+------------------+-------------+-------------------------
+ VLAN       10                        e8:e7:32:11:d4:78    dynamic            bridging            1/1/14
+ VLAN       52                        e8:e7:32:42:e0:4d    dynamic            bridging            1/5/3
+ SPB        3899:3899                 e8:e7:32:42:e0:4d    dynamic            servicing           sap:0/99:99
+ SPB        3899:3899                 e8:e7:32:42:e0:5c    dynamic            servicing           sap:0/99:99
+ VXLAN      5:5                       00:0e:1e:06:87:8c    dynamic            servicing           sap:1/1/20A
+ VXLAN      5:5                       00:c0:dd:10:2c:c1    dynamic            servicing           sap:1/1/20A
+ EVPN-VXLAN 100:1000                  00:00:00:00:00:11    dynamic            servicing           sap:1/1/3:10
+
+ Total number of Valid MAC addresses above = 7

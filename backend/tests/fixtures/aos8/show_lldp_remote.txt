@@ -1,0 +1,11 @@
+Remote LLDP nearest-bridge Agents on Local Port 1/1/16:
+
+    Chassis e8:e7:32:a4:91:e9, Port 1030:
+      Remote ID                   = 10,
+      Chassis Subtype             = 4 (MAC Address),
+      Port Subtype                = 7 (Locally assigned),
+      Port Description            = (null),
+      System Name                 = (null),
+      System Description          = (null),
+      Capabilities Supported      = Bridge Router,
+      Capabilities Enabled        = Bridge Router

@@ -1,0 +1,8 @@
+   vlan     type         status
++------+-----------+--------------+
+     1     untagged    forwarding
+     2     tagged      forwarding
+     5     dynamic     blocking
+     3     tagged      blocking
+    20     UNP Untagged forwarding
+    21     UNP QTagged  forwarding

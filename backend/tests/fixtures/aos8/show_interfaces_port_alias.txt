@@ -1,0 +1,8 @@
+Legends:WTS - Wait to shutdown
+        # - WTS Timer is Running & port is in wait-to-shutdown state
+
+Chas/
+Slot/   Admin     Link    WTR   WTS    Alias
+Port    Status   Status  (sec) (msec)
+-----+----------+---------+-----+----+----------------------------------
+1/1/2   disable     down     5   #10  ""

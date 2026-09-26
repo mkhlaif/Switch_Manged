@@ -1,0 +1,11 @@
+Legend: Mac Address: * = address not valid
+
+ Vlan    Mac Address       Type     Protocol    Operation         Interface
+------+-------------------+--------------+-----------+------------+-----------
+   1  00:00:00:00:00:01     learned         0800     bridging          8/ 1
+   1  00:d0:95:6a:73:9a     learned     aaaa0003     bridging         10/23
+  11  00:d0:95:a3:e0:0d     learned          ---     bridging          1/3
+  12  00:d0:95:ad:e3:cc     learned                  bridging          2/1
+  13  00:d0:95:ae:3b:f6     learned          ---     bridging          0/29
+
+Total number of Valid MAC addresses above = 5
