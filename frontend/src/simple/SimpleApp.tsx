@@ -1,8 +1,9 @@
-// Simplified experience for the MAC_OPERATOR role (§61–78).
+// Simplified experience for the MAC_OPERATOR role.
 //
-// Deliberately minimal: a MAC address, a switch name and one button. No ports, VLANs, IPs,
-// models, commands or technical errors are ever requested or shown. This screen is NOT a
-// security boundary: the backend enforces the same checks for every request it receives.
+// Deliberately minimal: a MAC address, the device's location and one Restart button (no
+// administrator approval; the server runs every safety check). No switch names, ports, VLANs,
+// IPs, models, commands or technical errors are ever requested, received or shown — the API
+// response itself is role-aware. This screen is NOT a security boundary.
 import { CheckCircle2, Loader2, LogOut, Network, RotateCcw, Search, TriangleAlert, XCircle } from "lucide-react";
 import { useEffect, useRef, useState, type FormEvent } from "react";
 import { api } from "../api/client";
@@ -130,9 +131,9 @@ export default function SimpleApp() {
                     <CheckCircle2 className="h-6 w-6" /> Device Found
                   </div>
                   <div>
-                    <div className="text-sm uppercase tracking-wide text-slate-500">Switch</div>
-                    <div className="mt-1 text-3xl font-bold" data-testid="simple-switch">
-                      {result.switch_name}
+                    <div className="text-sm uppercase tracking-wide text-slate-500">Location</div>
+                    <div className="mt-1 text-2xl font-bold break-words sm:text-3xl" data-testid="simple-location">
+                      {result.location}
                     </div>
                   </div>
                   {phase === "result" && result.can_restart && (

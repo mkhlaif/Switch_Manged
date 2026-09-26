@@ -1,13 +1,15 @@
-"""Simplified API for the MAC_OPERATOR role (§61–78).
+"""Simplified API for the MAC_OPERATOR role.
 
-Exactly two capabilities: SEARCH_MAC and REQUEST_RESTART_PORT. The client never chooses a
-switch or a port: the server derives the single valid location from the user's own completed
-search and re-verifies everything through the normal restart pipeline (pre-check, restart
-policy, Command Safety Firewall, locks, post-verification). This module is a thin, restrictive
-front end to that pipeline — it is not a security boundary and adds no bypass.
+Exactly two capabilities: SEARCH_MAC (the answer is the device's human location only) and a
+direct RESTART of the endpoint port — no administrator approval, but every technical safety
+check stays mandatory. The client never chooses a switch, port or VLAN: the server derives the
+single valid location from the user's own recent search, re-reads the port and runs the normal
+restart pipeline (fresh re-check, restart policy, endpoint evidence gate, NetBox evidence,
+Command Safety Firewall, operation mode / kill switch / SAFE MODE, locks, pre-restart
+re-verification, post-restart verification). This module adds no bypass.
 
-Responses never contain technical data (no port, VLAN, IP, model, command, error text). Every
-technical detail is written to the audit log and the application log instead.
+Responses never contain technical data (no switch name, port, VLAN, IP, model, command, error
+text). Every technical detail is written to the audit log and the application log instead.
 """
 
 from __future__ import annotations
@@ -32,6 +34,7 @@ from app.models import (
     PortAction,
     PortActionStatus,
     SearchStatus,
+    Switch,
     User,
 )
 from app.schemas.common import SimpleRestartRequest, SimpleSearchRequest
@@ -52,7 +55,19 @@ RESTART_OK = "Device restarted successfully."
 RESTART_NOT_BACK = "The device could not be verified after restart. Please contact IT support."
 RESTART_FAILED = "The device could not be restarted. Please contact IT support."
 INVALID_MAC = "Please enter a valid MAC address."
+NO_LOCATION = "Location not recorded"
 SEARCH_MAX_AGE = timedelta(minutes=10)
+
+
+def device_location(switch: Switch | None, port: str | None) -> str:
+    """The only location text a MAC_OPERATOR sees: the administrator-defined label of the port,
+    otherwise the switch's site and location. Never the switch name, address or port."""
+    if switch is None:
+        return NO_LOCATION
+    label = (switch.port_locations or {}).get(port or "")
+    if label:
+        return label
+    return " - ".join(p for p in (switch.site, switch.location) if p) or NO_LOCATION
 
 
 def _msg(state: str, message: str, **extra) -> dict:
@@ -66,9 +81,19 @@ async def _own_search(db: AsyncSession, user: User, search_id: str) -> MacSearch
     return search
 
 
-def _evaluate(search: MacSearch, rows: list[MacSearchResult]) -> dict:
-    """Decide what the simplified user sees, and whether a restart may be requested.
-    Internal only: returns the chosen row id, which is never sent to the client."""
+async def _switches(db: AsyncSession, rows: list[MacSearchResult]) -> dict[int, Switch]:
+    ids = {r.switch_id for r in rows if r.switch_id}
+    if not ids:
+        return {}
+    return {s.id: s for s in (await db.execute(select(Switch).where(Switch.id.in_(ids))))
+            .scalars()}
+
+
+def _evaluate(search: MacSearch, rows: list[MacSearchResult],
+              switches: dict[int, Switch]) -> dict:
+    """Decide what the simplified user sees, and whether a restart may be offered. Internal
+    only: returns the chosen row id, which is never sent to the client. Offering the button is
+    a preview; the restart request re-checks everything on the switch."""
     if search.status in {SearchStatus.QUEUED.value, SearchStatus.RUNNING.value}:
         return _msg("searching", "Searching…")
     if search.status != SearchStatus.COMPLETED.value:
@@ -83,14 +108,17 @@ def _evaluate(search: MacSearch, rows: list[MacSearchResult]) -> dict:
         return _msg("multiple", MULTIPLE)
     if len(edge) == 1:
         e = edge[0]
+        sw = switches.get(e.switch_id or 0)
         can_restart = (e.classification == "ACCESS"
-                       and e.classification_confidence in {"High", "Medium"}
+                       and e.classification_confidence == "High"
+                       and sw is not None and (sw.role or "") == "access"
                        and not failed)
-        return _msg("found", "Device Found", switch_name=e.switch_name,
+        return _msg("found", "Device Found", location=device_location(sw, e.port),
                     can_restart=can_restart, _row_id=e.id)
-    switches = {r.switch_name for r in found}
-    if len(switches) == 1:
-        return _msg("found", "Device Found", switch_name=next(iter(switches)),
+    switch_ids = {r.switch_id for r in found}
+    if len(switch_ids) == 1:
+        sw = switches.get(next(iter(switch_ids)) or 0)
+        return _msg("found", "Device Found", location=device_location(sw, None),
                     can_restart=False)
     return _msg("multiple", MULTIPLE)
 
@@ -135,9 +163,9 @@ async def simple_search_status(search_id: str,
         search = await _own_search(db, user, search_id)
         if search is None:
             return _msg("error", GENERIC_ERROR)
-        rows = (await db.execute(select(MacSearchResult).where(
-            MacSearchResult.search_id == search.id))).scalars().all()
-        return _public(_evaluate(search, list(rows)))
+        rows = list((await db.execute(select(MacSearchResult).where(
+            MacSearchResult.search_id == search.id))).scalars().all())
+        return _public(_evaluate(search, rows, await _switches(db, rows)))
     except Exception:  # noqa: BLE001
         log.exception("Simple search status failed")
         return _msg("error", GENERIC_ERROR)
@@ -164,19 +192,26 @@ async def simple_restart(body: SimpleRestartRequest, request: Request,
             return await blocked("search not found or not owned by the user")
         if search.finished_at is None or utcnow() - search.finished_at > SEARCH_MAX_AGE:
             return await blocked("search result is too old; a new search is required")
-        rows = (await db.execute(select(MacSearchResult).where(
-            MacSearchResult.search_id == search.id))).scalars().all()
-        verdict = _evaluate(search, list(rows))
+        rows = list((await db.execute(select(MacSearchResult).where(
+            MacSearchResult.search_id == search.id))).scalars().all())
+        verdict = _evaluate(search, rows, await _switches(db, rows))
         if verdict["state"] != "found" or not verdict.get("can_restart"):
-            return await blocked(f"not exactly one confident ACCESS location "
-                                 f"(state={verdict['state']})")
+            return await blocked(f"not exactly one High-confidence ACCESS location on an access "
+                                 f"switch (state={verdict['state']})")
+        row = next(r for r in rows if r.id == verdict["_row_id"])
+        # Fresh read of the switch + policy + endpoint gate + NetBox + firewall safety test.
         action = await prepare_restart(db, user, method="link_bounce",
-                                       search_result_id=verdict["_row_id"], ip=ip)
+                                       search_result_id=row.id, ip=ip)
         if action.status != PortActionStatus.PLANNED.value or not action.available \
                 or not action.execution_allowed or action.dry_run \
                 or action.required_phrases:
             return await blocked(f"restart plan not executable: "
                                  f"{action.blocked_reason or action.execution_note or 'dry run'}")
+        if action.switch_id != row.switch_id or action.port != row.port or \
+                action.vlan_id != row.vlan_id:
+            return await blocked(f"network state changed since the search (switch/port/VLAN "
+                                 f"{row.switch_name} {row.port} VLAN {row.vlan_id} → "
+                                 f"{action.switch_name} {action.port} VLAN {action.vlan_id})")
         action = await execute_restart(db, user, plan_token=action.plan_token,
                                        confirmations=[], reason="Simple restart (MAC_OPERATOR)",
                                        ip=ip)
@@ -205,9 +240,11 @@ async def simple_restart_status(request_id: str,
         if action.status == PortActionStatus.RUNNING.value:
             return _msg("running", "Restarting the device…")
         if action.status == PortActionStatus.SUCCESS.value:
-            learned = bool((action.verification or {}).get("mac_learned"))
-            return _msg("success" if learned else "success_pending",
-                        RESTART_OK if learned else RESTART_NOT_BACK)
+            # Success only when the post-restart verification fully passed (port up, MAC back
+            # on the same port and VLAN, VLANs and classification unchanged).
+            verified = bool((action.verification or {}).get("verified"))
+            return _msg("success" if verified else "success_pending",
+                        RESTART_OK if verified else RESTART_NOT_BACK)
         return _msg("failed", RESTART_FAILED)
     except Exception:  # noqa: BLE001
         log.exception("Simple restart status failed")

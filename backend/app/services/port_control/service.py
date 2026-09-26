@@ -64,7 +64,11 @@ from app.security.firewall import (
     get_firewall,
 )
 from app.security.recorder import AlertItem, get_recorder
-from app.security.restart_policy import check_phrases, evaluate_restart_policy
+from app.security.restart_policy import (
+    check_phrases,
+    endpoint_evidence_problems,
+    evaluate_restart_policy,
+)
 from app.security.validators import MacAddressValidator, ParameterRejected, PortValidator
 from app.services import system_settings
 from app.services.alcatel.adapter import AlcatelAdapter
@@ -73,6 +77,7 @@ from app.services.alcatel.profiles import BounceMethod, CommandProfile
 from app.services.alcatel.registry import choose_strategy, load_profiles, select_profile
 from app.services.audit.service import record
 from app.services.classification.engine import PortClass
+from app.services.integrations.netbox import endpoint_port_evidence
 from app.services.inventory.service import build_target, known_switches
 from app.services.ssh.errors import CommandFailed, SwitchError
 from app.services.ssh.manager import ConnectionTarget, get_connector
@@ -281,6 +286,12 @@ async def prepare_restart(
             f"MAC {format_mac(mac)} is no longer learned on {port} (currently: {elsewhere}). "
             "Run a new search before restarting."), user, ip, snapshot)
 
+    if snapshot.get("admin_status") == "disabled":
+        return await _save_plan(db, deny(
+            "PORT RESTART BLOCKED. The port is administratively disabled; a restart would "
+            "enable it, which is a configuration change. No command was executed."),
+            user, ip, snapshot)
+
     c = inv.classification
     assert c is not None
     action.vlan_id = snapshot["mac_vlan"]
@@ -302,6 +313,23 @@ async def prepare_restart(
     action.trunk_override = policy.trunk_override
     if not policy.allowed:
         return await _save_plan(db, deny(policy.blocked_reason), user, ip, snapshot)
+
+    # NetBox (read-only), when configured: documentation that contradicts an endpoint port.
+    verdict, nb_detail = await endpoint_port_evidence(switch.name, port)
+    if verdict != "not_configured":
+        _step(action, "netbox", verdict not in {"contradicts", "unavailable"}, nb_detail,
+              verdict=verdict)
+    if user.role_enum is Role.MAC_OPERATOR:
+        # No human approval in this flow, so every independent signal must agree.
+        problems = endpoint_evidence_problems(snapshot, switch.role or "")
+        if verdict in {"contradicts", "unavailable"}:
+            problems.append(nb_detail)
+        if problems:
+            return await _save_plan(db, deny(
+                "RESTART BLOCKED for the simplified flow: " + "; ".join(problems)
+                + ". No command was executed."), user, ip, snapshot)
+    elif verdict == "contradicts":
+        action.warnings = [*action.warnings, f"NetBox: {nb_detail}"]
 
     choice = await choose_strategy(db, profile, switch, bounce_method)
     if not choice.dry_run_possible:
@@ -651,6 +679,8 @@ async def _bounce(db: AsyncSession, action: PortAction, auth: RestartAuthorizati
             await _save_snapshot(db, action, "before", before)
             changes = state_changes(plan or {}, before) if plan else [
                 "no confirmed plan snapshot exists"]
+            if not changes and ctx.role is Role.MAC_OPERATOR:
+                changes = endpoint_evidence_problems(before, switch.role or "")
             if changes:
                 _step(action, "pre_restart_verification", False, STATE_CHANGED, changes=changes)
                 await _finish(db, action, PortActionStatus.ABORTED, ctx,
@@ -873,6 +903,19 @@ async def _verify(target: ConnectionTarget, ctx: ExecutionContext, profile: Comm
     if not result["mac_learned"]:
         result["warning"] = MAC_NOT_RELEARNED
     result["elapsed_seconds"] = round(time.monotonic() - started, 1)
+    problems = []
+    if result["port_status"] != "up":
+        problems.append(f"port state {result['port_status'] or 'unknown'}")
+    if not result["mac_learned"]:
+        problems.append("MAC not relearned on the port")
+    elif action.vlan_id is not None and result["mac_vlan"] != action.vlan_id:
+        problems.append(f"MAC relearned in VLAN {result['mac_vlan']}, expected {action.vlan_id}")
+    if action.vlans and result["vlan_matches"] is not True:
+        problems.append("port VLAN membership differs or could not be read")
+    if result.get("classification") != action.classification:
+        problems.append(f"classification now {result.get('classification') or 'unknown'}")
+    result["verified"] = not problems
+    result["verification_problems"] = problems
     return result
 
 

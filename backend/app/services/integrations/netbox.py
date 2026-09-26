@@ -115,10 +115,47 @@ def _interface(i: dict) -> dict:
         "id": i.get("id"), "name": i.get("name"), "enabled": i.get("enabled"),
         "description": i.get("description") or "",
         "mode": _name(i.get("mode")),
+        "type": _name(i.get("type")),
+        "mgmt_only": bool(i.get("mgmt_only")),
+        "lag": bool(i.get("lag")),
         "untagged_vlan": untagged.get("vid") if isinstance(untagged, dict) else None,
         "tagged_vlans": sorted(v.get("vid") for v in i.get("tagged_vlans") or []
                                if isinstance(v, dict) and v.get("vid") is not None),
     }
+
+
+async def endpoint_port_evidence(device: str, port: str,
+                                 client: NetBoxClient | None = None) -> tuple[str, str]:
+    """NetBox evidence for the MAC_OPERATOR endpoint check (read-only GET).
+
+    Returns (verdict, detail): ``not_configured`` / ``not_documented`` (no evidence either way),
+    ``consistent``, ``contradicts`` (NetBox documents a trunk, LAG member, management or
+    disabled interface) or ``unavailable`` (configured but the lookup failed → fail closed).
+    """
+    try:
+        client = client or get_netbox()
+    except IntegrationNotConfigured:
+        return "not_configured", "NetBox is not configured."
+    try:
+        nb = await client.interface(device, port)
+    except IntegrationError as exc:
+        return "unavailable", f"NetBox lookup failed: {exc.message}"
+    if nb is None:
+        return "not_documented", "The interface is not documented in NetBox."
+    reasons = []
+    if nb.get("mode") in {"tagged", "tagged-all", "q-in-q"}:
+        reasons.append(f"mode {nb['mode']}")
+    if nb.get("mgmt_only"):
+        reasons.append("management-only interface")
+    if nb.get("lag"):
+        reasons.append("member of a LAG")
+    if nb.get("type") in {"lag", "virtual", "bridge"}:
+        reasons.append(f"interface type {nb['type']}")
+    if nb.get("enabled") is False:
+        reasons.append("documented as disabled")
+    if reasons:
+        return "contradicts", "NetBox documents " + ", ".join(reasons) + "."
+    return "consistent", f"NetBox documents an interface in mode {nb.get('mode') or 'unset'}."
 
 
 def get_netbox() -> NetBoxClient:

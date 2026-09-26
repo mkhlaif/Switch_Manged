@@ -32,12 +32,14 @@ beforeEach(() => {
 afterEach(() => cleanup());
 
 describe("SimpleApp (MAC_OPERATOR)", () => {
-  it("shows only the switch name and a restart button when the device is found", async () => {
+  it("shows only the device location and a restart button when the device is found", async () => {
     post.mockResolvedValueOnce({ state: "searching", message: "Searching…", search_id: "s-1" });
-    get.mockResolvedValueOnce({ state: "found", message: "Device Found", switch_name: "SW-ACCESS-37", can_restart: true });
+    get.mockResolvedValueOnce({ state: "found", message: "Device Found", location: "Building A - Floor 2 - Office 204", can_restart: true });
     render(<SimpleApp />);
     await search();
-    expect(await screen.findByText("SW-ACCESS-37")).toBeTruthy();
+    expect(await screen.findByText("Building A - Floor 2 - Office 204")).toBeTruthy();
+    expect(screen.getByText("Location")).toBeTruthy();
+    expect(screen.queryByText(/switch/i)).toBeNull();
     expect(screen.getByText("Device Found")).toBeTruthy();
     expect(screen.getByRole("button", { name: /restart device/i })).toBeTruthy();
     expect(post).toHaveBeenCalledWith("/api/simple/search", { mac: "00:11:22:33:44:55" });
@@ -46,7 +48,7 @@ describe("SimpleApp (MAC_OPERATOR)", () => {
 
   it("asks a simple confirmation without typing, then reports success", async () => {
     post.mockResolvedValueOnce({ state: "searching", message: "", search_id: "s-1" });
-    get.mockResolvedValueOnce({ state: "found", message: "Device Found", switch_name: "SW-1", can_restart: true });
+    get.mockResolvedValueOnce({ state: "found", message: "Device Found", location: "Office 101", can_restart: true });
     render(<SimpleApp />);
     await search();
     fireEvent.click(await screen.findByRole("button", { name: /restart device/i }));
@@ -73,20 +75,20 @@ describe("SimpleApp (MAC_OPERATOR)", () => {
 
   it("polls correctly under React StrictMode (mount, unmount, mount)", async () => {
     post.mockResolvedValueOnce({ state: "searching", message: "", search_id: "s-9" });
-    get.mockResolvedValueOnce({ state: "found", message: "Device Found", switch_name: "SW-9", can_restart: true });
+    get.mockResolvedValueOnce({ state: "found", message: "Device Found", location: "Office 909", can_restart: true });
     render(
       <StrictMode>
         <SimpleApp />
       </StrictMode>,
     );
     await search();
-    expect(await screen.findByText("SW-9")).toBeTruthy();
+    expect(await screen.findByText("Office 909")).toBeTruthy();
     expect(get).toHaveBeenCalledWith("/api/simple/search/s-9");
   });
 
   it("offers no restart when the backend says it is not safe", async () => {
     post.mockResolvedValueOnce({ state: "searching", message: "", search_id: "s-2" });
-    get.mockResolvedValueOnce({ state: "found", message: "Device Found", switch_name: "SW-2", can_restart: false });
+    get.mockResolvedValueOnce({ state: "found", message: "Device Found", location: "Office 202", can_restart: false });
     render(<SimpleApp />);
     await search();
     expect(await screen.findByText("This device cannot be restarted automatically. Please contact IT support.")).toBeTruthy();
@@ -115,7 +117,7 @@ describe("SimpleApp (MAC_OPERATOR)", () => {
 
   it("reports a failed restart in plain language", async () => {
     post.mockResolvedValueOnce({ state: "searching", message: "", search_id: "s-4" });
-    get.mockResolvedValueOnce({ state: "found", message: "Device Found", switch_name: "SW-4", can_restart: true });
+    get.mockResolvedValueOnce({ state: "found", message: "Device Found", location: "Office 404", can_restart: true });
     render(<SimpleApp />);
     await search();
     fireEvent.click(await screen.findByRole("button", { name: /restart device/i }));

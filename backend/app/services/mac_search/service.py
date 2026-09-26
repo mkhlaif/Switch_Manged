@@ -166,6 +166,8 @@ async def start_search(db: AsyncSession, user: User, mac_input: str,
                        code="NO_SWITCHES", action="Add or enable switches in the inventory.")
 
     settings = await system_settings.get_all(db)
+    # The simplified (MAC_OPERATOR) flow always collects the full endpoint evidence.
+    full_evidence = mode == "DEEP" or purpose == "SIMPLE_SEARCH"
     search = MacSearch(
         mac=mac,
         requested_by_id=user.id,
@@ -177,8 +179,8 @@ async def start_search(db: AsyncSession, user: User, mac_input: str,
             "switch_ids": [s.id for s in switches],
             "role": user.role,
             "purpose": purpose,
-            "include_lldp": mode == "DEEP" or bool(settings["search_include_lldp"]),
-            "include_mac_count": mode == "DEEP" or bool(settings["search_include_mac_count"]),
+            "include_lldp": full_evidence or bool(settings["search_include_lldp"]),
+            "include_mac_count": full_evidence or bool(settings["search_include_mac_count"]),
         },
     )
     db.add(search)

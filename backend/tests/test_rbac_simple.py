@@ -28,10 +28,21 @@ def writes(lab, name="SIM-SW-01"):
 
 
 def assert_non_technical(payload: dict) -> None:
-    assert set(payload) <= {"state", "message", "switch_name", "can_restart", "search_id",
+    assert set(payload) <= {"state", "message", "location", "can_restart", "search_id",
                             "request_id"}, payload
-    text = str(payload.get("message", ""))
-    assert not TECHNICAL.search(text), text
+    for key in ("message", "location"):
+        text = str(payload.get(key, ""))
+        assert not TECHNICAL.search(text), text
+    assert "SIM-SW" not in str(payload)  # never the switch name
+
+
+ACCESS_ROLES = {"SIM-SW-01": "access", "SIM-SW-03": "access", "SIM-SW-02": "distribution"}
+
+
+async def seed_access(names: list[str]) -> dict[str, int]:
+    """Lab switches with their topology roles (MAC_OPERATOR restarts need role 'access')."""
+    return await seed_lab_switches(names, roles={n: ACCESS_ROLES.get(n, "unknown")
+                                                 for n in names})
 
 
 async def audit_rows(action: str) -> list[AuditLog]:
@@ -149,11 +160,40 @@ async def test_other_roles_cannot_use_the_simple_api(reader, operator, admin):
 
 
 # ---------------------------------------------------------------------- simple search ---
-async def test_simple_search_found_shows_only_the_switch_name(macop, lab):
-    await seed_lab_switches(["SIM-SW-01", "SIM-SW-02"])
+async def test_simple_search_found_shows_only_the_location(macop, lab):
+    await seed_access(["SIM-SW-01", "SIM-SW-02"])
     result = await simple_search(macop, "00-11-22-33-44-55")
     assert result["state"] == "found" and result["message"] == "Device Found"
-    assert result["switch_name"] == "SIM-SW-01" and result["can_restart"] is True
+    assert result["location"] == "Building A / Floor 1" and result["can_restart"] is True
+    assert "switch_name" not in result
+    assert_non_technical(result)
+
+
+async def test_simple_search_shows_the_port_location_label(macop, lab):
+    from app.models import Switch
+
+    ids = await seed_access(["SIM-SW-01"])
+    async with session_factory()() as db:
+        sw = await db.get(Switch, ids["SIM-SW-01"])
+        sw.site = "Main campus"
+        sw.port_locations = {"1/1/26": "Building A - Floor 2 - Office 204"}
+        await db.commit()
+    result = await simple_search(macop, MAC_ACCESS)
+    assert result["location"] == "Building A - Floor 2 - Office 204"
+    assert_non_technical(result)
+    # Without a port label: site and location, never the switch name.
+    async with session_factory()() as db:
+        sw = await db.get(Switch, ids["SIM-SW-01"])
+        sw.port_locations = {}
+        await db.commit()
+    result = await simple_search(macop, MAC_ACCESS)
+    assert result["location"] == "Main campus - Building A / Floor 1"
+
+
+async def test_simple_search_offers_no_restart_on_switch_without_access_role(macop, lab):
+    await seed_lab_switches(["SIM-SW-01"])  # role "unknown"
+    result = await simple_search(macop, MAC_ACCESS)
+    assert result["state"] == "found" and result["can_restart"] is False
     assert_non_technical(result)
 
 
@@ -176,7 +216,7 @@ async def test_simple_search_multiple_locations(macop, lab):
 
 
 async def test_simple_search_unreachable_switch_is_generic_and_blocks_restart(macop, lab):
-    await seed_lab_switches(["SIM-SW-01", "SIM-SW-04"])  # SIM-SW-04: authentication failure
+    await seed_access(["SIM-SW-01", "SIM-SW-04"])  # SIM-SW-04: authentication failure
     result = await simple_search(macop, MAC_ACCESS)
     assert result["state"] == "found" and result["can_restart"] is False  # uncertainty
     assert_non_technical(result)
@@ -219,7 +259,7 @@ async def test_simple_search_of_another_user_is_invisible(macop, make_client, la
 
 # --------------------------------------------------------------------- simple restart ---
 async def test_simple_restart_end_to_end(macop, admin, lab):
-    await seed_lab_switches(["SIM-SW-01", "SIM-SW-02"])
+    await seed_access(["SIM-SW-01", "SIM-SW-02"])
     await go_live(admin)
     found = await simple_search(macop, MAC_ACCESS)
     assert found["can_restart"] is True
@@ -240,7 +280,7 @@ async def test_simple_restart_end_to_end(macop, admin, lab):
 
 
 async def test_simple_restart_blocked_outside_maintenance(macop, admin, lab):
-    await seed_lab_switches(["SIM-SW-01", "SIM-SW-02"])
+    await seed_access(["SIM-SW-01", "SIM-SW-02"])
     await go_live(admin)
     await set_mode("NORMAL")
     found = await simple_search(macop, MAC_ACCESS)
@@ -256,7 +296,7 @@ async def test_simple_restart_blocked_outside_maintenance(macop, admin, lab):
     (MAC_PHONE_PC, ["SIM-SW-02", "SIM-SW-03"]),   # phone + PC: only LIKELY_ACCESS
 ])
 async def test_simple_restart_refuses_uncertain_ports(macop, admin, lab, mac, switches):
-    await seed_lab_switches(switches)
+    await seed_access(switches)
     await go_live(admin)
     found = await simple_search(macop, mac)
     assert found.get("can_restart") is not True
@@ -276,7 +316,7 @@ async def test_simple_restart_refuses_infrastructure_switch(macop, admin, lab):
 
 
 async def test_simple_restart_parameter_tampering_is_rejected(macop, admin, lab):
-    await seed_lab_switches(["SIM-SW-01"])
+    await seed_access(["SIM-SW-01"])
     await go_live(admin)
     found = await simple_search(macop, MAC_ACCESS)
     for extra in ({"switch_id": 1}, {"port": "1/1/5"}, {"command": "reload"},
