@@ -67,3 +67,30 @@ def permissions_for(role: Role | str) -> frozenset[Permission]:
 
 def has_permission(role: Role | str, permission: Permission) -> bool:
     return permission in permissions_for(role)
+
+
+PERMISSION_DESCRIPTIONS: dict[Permission, str] = {
+    Permission.MAC_SEARCH: "Technical MAC search and results",
+    Permission.PORT_INSPECT: "Live read-only port queries (GET_PORT_* operations)",
+    Permission.VIEW_INVENTORY: "Switch list, switch details and topology",
+    Permission.VIEW_HISTORY: "Search history",
+    Permission.VIEW_PORT_ACTIONS: "Port action history and change reports",
+    Permission.VIEW_DASHBOARD: "Dashboard",
+    Permission.VIEW_ALERTS: "Alerts",
+    Permission.VIEW_SAFETY: "Safety state, operation policy, command profiles",
+    Permission.VIEW_SETTINGS: "Runtime settings (read)",
+    Permission.VIEW_INTEGRATIONS: "NetBox / Zabbix read-only views",
+    Permission.TEST_SWITCH: "SSH connection test (discovery command only)",
+    Permission.RESTART_PORT: "Technical port restart workflow",
+    Permission.ACK_ALERTS: "Acknowledge alerts",
+    Permission.STOP_OPERATIONS: "Engage the kill switch (safety-increasing only)",
+    Permission.SIMPLE_SEARCH: "Simplified MAC search (switch name only)",
+    Permission.SIMPLE_RESTART: "Simplified restart request (confident ACCESS ports only)",
+    Permission.VIEW_AUDIT: "Audit log, security events, SSH session records",
+    Permission.MANAGE_INVENTORY: "Switches, host keys, model/version detection",
+    Permission.MANAGE_CREDENTIALS: "SSH credentials",
+    Permission.MANAGE_USERS: "Users, roles view, force logout",
+    Permission.MANAGE_PROFILES: "Command profiles and lab verification",
+    Permission.MANAGE_SAFETY: "Operation modes, kill-switch release, SAFE MODE reset",
+    Permission.EMERGENCY_ACTIONS: "Approve emergency operations (trunk override)",
+}

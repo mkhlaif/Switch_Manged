@@ -354,3 +354,28 @@ async def test_audit_log_is_append_only(admin):
         with pytest.raises(Exception, match="append-only"):
             await db.delete(row)
             await db.commit()
+
+
+# ------------------------------------------------------------------ topology / roles ---
+async def test_topology_is_built_from_stored_evidence_only(reader, macop, lab):
+    await seed_lab_switches(["SIM-SW-01", "SIM-SW-02"], roles={"SIM-SW-02": "distribution",
+                                                                "SIM-SW-01": "access"})
+    await search(reader, MAC_ACCESS)
+    before = sum(len(sw.command_log) for sw in lab.values())
+    topo = (await reader.get("/api/topology")).json()
+    assert sum(len(sw.command_log) for sw in lab.values()) == before  # no command sent
+    assert [n["name"] for n in topo["nodes"]] == ["SIM-SW-02", "SIM-SW-01"]  # by role
+    assert {(l["a"], l["a_port"], l["b"]) for l in topo["links"]} == {
+        ("SIM-SW-02", "1/1/1", "SIM-SW-01")}
+    assert all(l["observed_at"] for l in topo["links"])
+    assert (await macop.get("/api/topology")).status_code == 403
+
+
+async def test_roles_matrix_is_admin_only(admin, reader):
+    data = (await admin.get("/api/roles")).json()
+    by_role = {r["role"]: set(r["permissions"]) for r in data["roles"]}
+    assert by_role["mac_operator"] == {"simple_search", "simple_restart"}
+    assert "restart_port" in by_role["operator"] and "manage_users" in by_role["admin"]
+    assert len(data["permissions"]) == len({p for ps in by_role.values() for p in ps} | {
+        p["permission"] for p in data["permissions"]})
+    assert (await reader.get("/api/roles")).status_code == 403

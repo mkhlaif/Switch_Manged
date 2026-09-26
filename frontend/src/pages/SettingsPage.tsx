@@ -7,7 +7,7 @@ import { Badge, Button, Card, ErrorBanner, Field, Input, Loading, Modal, Notice,
 import { fmtDateTime, fmtRelative } from "../lib/format";
 import { useLoader } from "../lib/hooks";
 
-type Tab = "system" | "profiles" | "integrations" | "users" | "credentials" | "account";
+type Tab = "system" | "profiles" | "integrations" | "users" | "roles" | "credentials" | "account";
 
 export default function SettingsPage() {
   const { hasRole } = useAuth();
@@ -17,6 +17,7 @@ export default function SettingsPage() {
     { id: "profiles", label: "Command profiles", icon: <BookCheck className="h-4 w-4" /> },
     { id: "integrations", label: "Integrations", icon: <Plug className="h-4 w-4" /> },
     { id: "users", label: "Users", icon: <Users className="h-4 w-4" />, admin: true },
+    { id: "roles", label: "Roles", icon: <ShieldAlert className="h-4 w-4" />, admin: true },
     { id: "credentials", label: "Credentials", icon: <KeyRound className="h-4 w-4" />, admin: true },
     { id: "account", label: "My account", icon: <UserCog className="h-4 w-4" /> },
   ];
@@ -44,6 +45,7 @@ export default function SettingsPage() {
       {tab === "profiles" && <ProfilesTab />}
       {tab === "integrations" && <IntegrationsTab />}
       {tab === "users" && <UsersTab />}
+      {tab === "roles" && <RolesTab />}
       {tab === "credentials" && <CredentialsTab />}
       {tab === "account" && <AccountTab />}
     </>
@@ -736,7 +738,7 @@ function UsersTab() {
             <Input value={form.full_name} onChange={(e) => setForm({ ...form, full_name: e.target.value })} />
           </Field>
           <Field label="Role">
-            <Select value={form.role} onChange={(e) => setForm({ ...form, role: e.target.value as Role })}>
+            <Select value={form.role} disabled={editing !== "new" && editing?.id === me?.id} title={editing !== "new" && editing?.id === me?.id ? "You cannot change your own role" : undefined} onChange={(e) => setForm({ ...form, role: e.target.value as Role })}>
               <option value="mac_operator">MAC operator (simplified)</option>
               <option value="readonly">Read only</option>
               <option value="operator">Operator</option>
@@ -746,7 +748,7 @@ function UsersTab() {
           <Field label={editing === "new" ? "Password" : "New password (optional)"} hint="12+ characters, 3 of: lower, upper, digit, symbol">
             <Input type="password" autoComplete="new-password" value={form.password} onChange={(e) => setForm({ ...form, password: e.target.value })} />
           </Field>
-          {editing !== "new" && (
+          {editing !== "new" && editing?.id !== me?.id && (
             <label className="flex items-center gap-2 text-sm">
               <Toggle checked={form.is_active} onChange={(v) => setForm({ ...form, is_active: v })} label="Active" /> Active
             </label>
@@ -756,6 +758,52 @@ function UsersTab() {
           </div>
         </div>
       </Modal>
+    </Card>
+  );
+}
+
+/* ------------------------------------------------------------------ Roles */
+const ROLE_LABEL: Record<string, string> = { mac_operator: "MAC operator", readonly: "Read only", operator: "Operator", admin: "Admin" };
+
+function RolesTab() {
+  const { data, error, loading, reload } = useLoader(() =>
+    api.get<{ roles: { role: string; permissions: string[] }[]; permissions: { permission: string; description: string }[] }>("/api/roles"),
+  );
+  if (loading && !data) return <Loading />;
+  if (error && !data) return <ErrorBanner error={error} onRetry={() => reload()} />;
+  if (!data) return null;
+  return (
+    <Card title="Roles and permissions (fixed, enforced by the server on every request)" padded={false}>
+      <p className="px-4 pt-3 text-xs text-slate-500">
+        Roles are defined in code and cannot be edited here; assign a role to a user in the Users tab. A user can never change their own role. The MAC operator role is deliberately separate from the others.
+      </p>
+      <Table>
+        <thead>
+          <tr>
+            <Th>Permission</Th>
+            {data.roles.map((r) => (
+              <Th key={r.role} className="text-center">
+                {ROLE_LABEL[r.role] || r.role}
+              </Th>
+            ))}
+          </tr>
+        </thead>
+        <tbody>
+          {data.permissions.map((p) => (
+            <tr key={p.permission}>
+              <Td>
+                <div className="mono text-xs font-semibold">{p.permission}</div>
+                <div className="text-xs text-slate-500">{p.description}</div>
+              </Td>
+              {data.roles.map((r) => (
+                <Td key={r.role} className="text-center">
+                  {r.permissions.includes(p.permission) ? <span className="font-bold text-emerald-600" aria-label="allowed">✔</span> : <span className="text-slate-300" aria-label="not allowed">—</span>}
+                </Td>
+              ))}
+            </tr>
+          ))}
+        </tbody>
+      </Table>
     </Card>
   );
 }

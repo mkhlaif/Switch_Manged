@@ -14,6 +14,7 @@ import SafetyPage from "./pages/SafetyPage";
 import SettingsPage from "./pages/SettingsPage";
 import SwitchDetailPage from "./pages/SwitchDetailPage";
 import SwitchesPage from "./pages/SwitchesPage";
+import TopologyPage from "./pages/TopologyPage";
 import SimpleApp from "./simple/SimpleApp";
 
 function Routed() {
@@ -32,6 +33,7 @@ function Routed() {
         <Route path="switches" element={<SwitchesPage />} />
         <Route path="switches/:id" element={<SwitchDetailPage />} />
         <Route path="port" element={<PortDetailsPage />} />
+        <Route path="topology" element={<TopologyPage />} />
         <Route path="alerts" element={<AlertsPage />} />
         <Route path="history" element={<HistoryPage />} />
         <Route path="port-actions" element={<PortActionsPage />} />

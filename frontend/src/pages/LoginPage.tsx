@@ -32,7 +32,7 @@ export default function LoginPage() {
             <Network className="h-6 w-6" />
           </div>
           <div>
-            <h1 className="text-lg font-semibold">OmniSwitch MAC Locator</h1>
+            <h1 className="text-lg font-semibold">Network Operations</h1>
             <p className="text-xs text-slate-500">Alcatel-Lucent Enterprise · AOS network operations</p>
           </div>
         </div>

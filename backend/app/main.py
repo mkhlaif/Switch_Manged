@@ -28,6 +28,7 @@ from app.api.routes import (
     settings,
     simple,
     switches,
+    topology,
     users,
 )
 from app.core.config import get_settings
@@ -191,7 +192,8 @@ def create_app() -> FastAPI:
                 "running_tasks": len(tasks.running())}
 
     for module in (auth, users, credentials, switches, mac, history, ports, audit, settings,
-                   profiles, dashboard, operations, safety, alerts, integrations, simple):
+                   profiles, dashboard, operations, safety, alerts, integrations, simple,
+                   topology):
         app.include_router(module.router)
     return app
 

@@ -1,4 +1,4 @@
-import { Bell, FileClock, FlaskConical, History, LayoutDashboard, LogOut, Moon, Network, Power, Search, Server, Settings, ShieldAlert, ShieldCheck, Sun } from "lucide-react";
+import { Bell, FileClock, FlaskConical, History, LayoutDashboard, LogOut, Moon, Network, Power, Search, Server, Settings, Share2, ShieldAlert, ShieldCheck, Sun } from "lucide-react";
 import { useEffect, useState } from "react";
 import { NavLink, Outlet } from "react-router-dom";
 import { api } from "../api/client";
@@ -23,6 +23,7 @@ export const NAV: NavItem[] = [
   { to: "/", label: "Dashboard", icon: LayoutDashboard, end: true, permission: "view_dashboard" },
   { to: "/mac-search", label: "MAC Search", icon: Search, permission: "mac_search" },
   { to: "/switches", label: "Switches", icon: Server, permission: "view_inventory" },
+  { to: "/topology", label: "Topology", icon: Share2, permission: "view_inventory" },
   { to: "/alerts", label: "Alerts", icon: Bell, permission: "view_alerts" },
   { to: "/history", label: "Search History", icon: History, permission: "view_history" },
   { to: "/port-actions", label: "Port Actions", icon: Power, permission: "view_port_actions" },
