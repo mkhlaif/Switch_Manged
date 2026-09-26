@@ -196,7 +196,9 @@ Run these in order against **one lab switch per model/AOS version** you operate,
 6. As admin, run the **read-only verification** (`Settings → Command profiles`) on the lab switch and
    record `READ` for that model family and version.
 7. With **dry run enabled**, prepare a port restart on a lab access port. Check the exact command sequence shown.
-8. Switch to MAINTENANCE mode, disable dry run, restart the lab access port, and confirm post-restart
-   verification (port UP, MAC relearned, VLAN, change report).
-9. Record the strategy's lab verification for that model family and AOS version prefix.
-10. Re-enable dry run and return to NORMAL mode until you are ready for production.
+8. Run those two commands **by hand on the lab switch console** and confirm the port goes down and comes back up.
+9. Record the strategy's lab verification for that model family and AOS version prefix (the application executes a
+   strategy only when this record exists).
+10. Switch to MAINTENANCE mode, disable dry run, restart the lab access port through the application, and confirm
+    post-restart verification (port UP, MAC relearned, VLAN, change report).
+11. Re-enable dry run and return to NORMAL mode until you are ready for production.

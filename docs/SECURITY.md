@@ -33,8 +33,14 @@ CLI anywhere: not in the UI, not in the API, not in the code. Static tests
   token is stored.
 - Lockout after 5 failed logins (15 minutes). Login attempts are rate limited per IP and per
   username. Failed logins are audited.
+- Sessions end after 8 hours (`SESSION_TTL_MINUTES`) or after 60 minutes without activity
+  (`SESSION_IDLE_MINUTES`).
+- The client IP used for rate limits and the audit log cannot be forged: nginx overwrites
+  `X-Forwarded-For` with the TCP peer address (see [NETWORK_SETUP.md](NETWORK_SETUP.md) for load
+  balancers).
 - A password change signs out every other session. An administrator can **force logout** a user;
-  disabling a user or changing their role also ends their sessions.
+  disabling a user or changing their role also ends their sessions. Nobody can change their own
+  role or disable their own account.
 
 ## 3. RBAC
 
@@ -126,6 +132,11 @@ with a PostgreSQL role that does not own the schema (migrations with the owner r
 - Errors never expose stack traces; unexpected errors return a reference id that is in the
   server log.
 - Rate limits: login, MAC searches, port queries, restart prepare/execute.
+- CSV exports prefix cells that start with `=`, `+`, `-`, `@`, tab or CR with `'`, so
+  attacker-controlled text (e.g. a login name) cannot run as a spreadsheet formula.
+- Log lines escape CR/LF, so user input cannot forge log entries.
+- The web ports are published on `127.0.0.1` unless `BIND_ADDRESS` is set; the backend and
+  database are never published.
 
 ## 9. AI
 

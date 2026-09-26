@@ -1,0 +1,50 @@
+# Network Device Tool — how to restart a device
+
+You use this tool when a device (for example a PC, a phone or a printer) has stopped working on
+the network and IT support asked you to restart its connection.
+
+You need: your username and password, and the device's **MAC address** (a code like
+`00:11:22:33:44:55`, usually printed on a label on the device).
+
+## 1. Sign in
+
+Open the address IT gave you in your browser. Enter your **username** and **password** and press
+**Sign in**.
+
+## 2. Enter the MAC address
+
+Type the MAC address into the big box. You can type it with colons (`00:11:22:33:44:55`), dashes
+(`00-11-22-33-44-55`) or without separators (`001122334455`).
+
+## 3. Search
+
+Press **SEARCH** and wait a few seconds.
+
+## 4. Check the result
+
+| You see | What it means | What to do |
+|---|---|---|
+| **Device Found** and a **Switch** name | The device was found | Continue with step 5 |
+| **Device Not Found** | The device is not connected right now, or the code is wrong | Check the MAC address and try again |
+| **Multiple locations detected** | The tool cannot be sure where the device is | Contact IT support |
+| **This device cannot be restarted automatically** | For safety, this device must be handled by IT | Contact IT support |
+| **Something went wrong** | A temporary problem | Try again later or contact IT support |
+
+## 5. Restart the device
+
+Press **RESTART DEVICE**. A window asks **"Restart Device?"** — the device will be disconnected
+for a short moment. Press **Restart** to continue, or **Cancel** to stop.
+
+## 6. Wait for the confirmation
+
+| Message | Meaning |
+|---|---|
+| **Device restarted successfully.** | Done. The device should work again within about a minute. |
+| **The device could not be verified after restart. Please contact IT support.** | The restart was done, but the device has not come back yet. If it still does not work after a few minutes, contact IT support. |
+| **The device could not be restarted. Please contact IT support.** | Nothing more to try — contact IT support. |
+
+Press **Search another device** for the next one. Sign out with the button at the top right when
+you are done.
+
+Good to know: every action is recorded. You cannot break anything by searching; restarting only
+works for devices the system has safely identified.

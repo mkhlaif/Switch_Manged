@@ -439,7 +439,7 @@ function ProfilesTab() {
           <Notice tone="amber" title="Only record after a supervised lab test">
             {verifyFor?.capability === "READ"
               ? "Prefer the automated read-only verification run, which checks every command's output contract."
-              : "Run a dry run and then a real restart on a lab switch of this model family and AOS version, and confirm the port went down and came back up."}
+              : "Prepare a dry run on a lab switch of this model family and AOS version, run the two displayed commands by hand on the lab switch console and confirm the port went down and came back up. Then record it here; the application executes the strategy only for recorded model families and versions."}
           </Notice>
           <Field label="Model family" hint="“all models” applies to every supported model of the profile">
             <Select value={form.model_family} onChange={(e) => setForm({ ...form, model_family: e.target.value })}>

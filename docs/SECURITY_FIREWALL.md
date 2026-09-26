@@ -71,7 +71,7 @@ use `extra="forbid"`, so unknown fields cause a 422 and are never silently ignor
 | `DISCOVER_SYSTEM` (internal) | READ_ONLY | all | 1 | `system_info` = `show system` (separate `DISCOVERY_PROFILE`) |
 
 "Allowed roles" is the firewall's own check. Which *API* a role may call is decided separately by
-the permission model (see [SECURITY.md](SECURITY.md#rbac)): a `mac_operator`, for example, can reach
+the permission model (see [SECURITY.md](SECURITY.md#3-rbac)): a `mac_operator`, for example, can reach
 `SEARCH_MAC` and `RESTART_PORT` only through the simplified `/api/simple` endpoints, and only
 for a confidently classified ACCESS port.
 
