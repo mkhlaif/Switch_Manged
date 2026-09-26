@@ -1,6 +1,7 @@
 // Bulk switch import (administrators): upload → server validation → preview → explicit
-// confirmation → background import with progress → result. Nothing is written to the
-// inventory before the confirmation; the server re-checks every row while importing.
+// confirmation → background import with progress → result → automatic discovery. Nothing is
+// written to the inventory before the confirmation; the server re-checks every row while
+// importing. Atomic mode (default) imports every row or none.
 import { Download, FileUp, Upload } from "lucide-react";
 import { useEffect, useMemo, useRef, useState } from "react";
 import { api } from "../api/client";
@@ -24,7 +25,7 @@ function Stat({ label, value, tone }: { label: string; value: number; tone?: "gr
 
 function RowStatus({ row }: { row: ImportRow }) {
   if (row.result) {
-    const tone = row.result === "imported" || row.result === "updated" ? "green" : row.result === "failed" ? "red" : "slate";
+    const tone = row.result === "imported" || row.result === "updated" ? "green" : row.result === "failed" || row.result === "rolled_back" ? "red" : "slate";
     return <Badge tone={tone}>{row.result.replace("_", " ")}</Badge>;
   }
   if (row.status === "invalid") return <Badge tone="red">invalid</Badge>;
@@ -40,6 +41,7 @@ export function ImportDialog({ onClose, onImported }: { onClose: () => void; onI
   const [busy, setBusy] = useState(false);
   const [onExisting, setOnExisting] = useState<"skip" | "update">("skip");
   const [skipInvalid, setSkipInvalid] = useState(false);
+  const [mode, setMode] = useState<"atomic" | "per_row">("atomic");
   const [onlyProblems, setOnlyProblems] = useState(true);
   const stop = useRef(false);
 
@@ -77,7 +79,7 @@ export function ImportDialog({ onClose, onImported }: { onClose: () => void; onI
     setBusy(true);
     setError(null);
     try {
-      await api.post(`/api/switches/import/${job.id}/confirm`, { on_existing: onExisting, skip_invalid: skipInvalid });
+      await api.post(`/api/switches/import/${job.id}/confirm`, { on_existing: onExisting, skip_invalid: skipInvalid, mode });
       setStep("running");
       for (let i = 0; i < 3600 && !stop.current; i++) {
         const current = await api.get<ImportJob>(`/api/switches/import/${job.id}`, { rows: false });
@@ -109,7 +111,9 @@ export function ImportDialog({ onClose, onImported }: { onClose: () => void; onI
     return onlyProblems ? all.filter((r) => r.errors.length || r.warnings.length || r.status !== "valid" || r.result === "failed" || r.result === "skipped") : all;
   }, [job, onlyProblems]);
   const problems = (job?.invalid || 0) + (job?.duplicates || 0);
-  const canConfirm = !!job && job.status === "validated" && job.valid > 0 && (problems === 0 || skipInvalid);
+  // Atomic: the file must be fully valid (identical duplicate rows may be skipped).
+  const canConfirm =
+    !!job && job.status === "validated" && job.valid > 0 && (mode === "atomic" ? job.invalid === 0 && (!job.duplicates || skipInvalid) : problems === 0 || skipInvalid);
   const reportHref = job ? `/api/switches/import/${job.id}/report` : "#";
 
   const footer =
@@ -143,10 +147,17 @@ export function ImportDialog({ onClose, onImported }: { onClose: () => void; onI
         {step === "select" && (
           <>
             <p className="text-sm text-slate-600 dark:text-slate-300">
-              Upload a CSV or JSON file. Required columns: <span className="mono">name, management_ip, model, aos_version</span>; optional: <span className="mono">hostname, site, location, description, role, ssh_port, enabled, credential, uplink_ports</span>. Nothing is changed before you confirm the preview.
+              Upload a CSV or JSON file. Required columns: <span className="mono">name, management_ip</span>; optional:{" "}
+              <span className="mono">
+                credential_reference, ssh_host_key_fingerprint, ssh_port, hostname, site, location, description, role, environment, enabled, uplink_ports,
+                expected_model, expected_aos_version
+              </span>
+              . Vendor, model and AOS version are <strong>discovered automatically</strong> after the import; a <span className="mono">model</span> /{" "}
+              <span className="mono">aos_version</span> column is only compared with what discovery finds. Nothing is changed before you confirm the preview.
             </p>
             <Notice tone="blue" title="Never put passwords in import files">
-              Create the SSH account under Settings → Credentials and reference it by name in the <span className="mono">credential</span> column. Files with password, key or token columns are rejected.
+              Create the SSH account under Settings → Credentials and reference it by name in the <span className="mono">credential_reference</span> column. Files with
+              password, key or token columns are rejected. The SSH host-key fingerprint (read on the switch console) lets discovery start without trusting an unverified key.
             </Notice>
             <div className="flex flex-wrap items-center gap-3">
               <input
@@ -204,10 +215,25 @@ export function ImportDialog({ onClose, onImported }: { onClose: () => void; onI
                     <option value="update">Update them with the file's values</option>
                   </Select>
                 </label>
-                {problems > 0 && (
+                <label className="flex flex-wrap items-center gap-2 text-sm">
+                  Mode:
+                  <Select className="w-auto" aria-label="Import mode" value={mode} onChange={(e) => setMode(e.target.value as "atomic" | "per_row")}>
+                    <option value="atomic">All or nothing (recommended)</option>
+                    <option value="per_row">Row by row — skip invalid rows</option>
+                  </Select>
+                </label>
+                {mode === "atomic" && job.invalid > 0 && (
+                  <Notice tone="red" title="The file has invalid rows">
+                    An all-or-nothing import never imports part of a file. Fix the {job.invalid} invalid row{job.invalid === 1 ? "" : "s"} and upload the file again, or
+                    choose row-by-row mode.
+                  </Notice>
+                )}
+                {(mode === "per_row" ? problems > 0 : job.duplicates > 0) && (
                   <label className="flex items-center gap-2 text-sm">
                     <input type="checkbox" checked={skipInvalid} onChange={(e) => setSkipInvalid(e.target.checked)} />
-                    Skip the {problems} invalid/duplicate row{problems === 1 ? "" : "s"} and import only the valid ones
+                    {mode === "per_row"
+                      ? `Skip the ${problems} invalid/duplicate row${problems === 1 ? "" : "s"} and import only the valid ones`
+                      : `Skip the ${job.duplicates} identical duplicate row${job.duplicates === 1 ? "" : "s"}`}
                   </label>
                 )}
               </div>
@@ -227,6 +253,11 @@ export function ImportDialog({ onClose, onImported }: { onClose: () => void; onI
                   <div className="h-full bg-teal-600 transition-all" style={{ width: `${job.total ? (100 * job.processed) / job.total : 0}%` }} />
                 </div>
                 {job.error && <p className="mt-2 text-sm text-red-700 dark:text-red-400">{job.error}</p>}
+                {step === "done" && job.discovery_job_id && (
+                  <p className="mt-2 text-sm text-slate-600 dark:text-slate-300">
+                    Automatic discovery started for the imported switches with a trusted or supplied host-key fingerprint. Follow it on the Switches page.
+                  </p>
+                )}
               </div>
             )}
 

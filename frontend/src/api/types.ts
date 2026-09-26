@@ -16,14 +16,30 @@ export interface User {
 export type SwitchStatus = "unknown" | "online" | "offline" | "auth_failed" | "hostkey_error" | "error";
 export type SwitchRole = "access" | "distribution" | "core" | "unknown";
 
+export type DiscoveryStatus = "not_discovered" | "discovered" | "discovery_failed" | "mismatch";
+
 export interface Switch {
   id: number;
   name: string;
   host: string;
   hostname: string;
   ssh_port: number;
+  // Discovered identity (read-only: from automatic discovery, never typed in).
+  vendor: string;
   model: string;
   aos_version: string;
+  discovery_status: DiscoveryStatus;
+  discovery_error: string;
+  discovery_category: string;
+  discovery_profile: string;
+  discovered_at: string | null;
+  system_name: string;
+  system_object_id: string;
+  // Administrator metadata compared with discovery (a difference = mismatch).
+  expected_model: string;
+  expected_aos_version: string;
+  expected_host_key_fingerprint: string;
+  environment: "production" | "lab";
   site: string;
   location: string;
   description: string;
@@ -58,7 +74,19 @@ export interface Credential {
   updated_at: string;
 }
 
-export type PortClass = "ACCESS" | "LIKELY_ACCESS" | "UNKNOWN" | "LIKELY_TRUNK" | "TRUNK" | "";
+export type PortClass =
+  | "ACCESS"
+  | "LIKELY_ACCESS"
+  | "UNKNOWN"
+  | "LIKELY_TRUNK"
+  | "TRUNK"
+  | "UPLINK"
+  | "LAG"
+  | "CORE"
+  | "DISTRIBUTION"
+  | "MANAGEMENT"
+  | "STACK"
+  | "";
 
 export interface Reason {
   indicates: "trunk" | "access" | "neutral";
@@ -197,6 +225,7 @@ export interface MacSearchResult {
   warnings: string[];
   duration_ms: number | null;
   created_at: string;
+  category: string; // safe error category ("" when found / not found)
 }
 
 export interface Step {
@@ -246,6 +275,9 @@ export interface PortAction {
   commands: string[];
   commands_executed: string[];
   steps: Step[];
+  outcome?: "SUCCESS" | "VERIFICATION_FAILED" | "FAILED" | "UNKNOWN" | "BLOCKED" | null;
+  error_category?: string | null;
+  profile_version?: string | null;
   verification: {
     port_status?: string | null;
     mac_learned?: boolean;
@@ -320,6 +352,7 @@ export interface SafetyState {
   dry_run_mode: boolean;
   unavailable_reason: string;
   state_changing_block_reason: string | null;
+  network_state: "NORMAL" | "READ_ONLY" | "SAFE_MODE" | "EMERGENCY_STOP" | "MAINTENANCE" | "EMERGENCY_OVERRIDE";
   indicator: SafetyIndicator;
   state_changes_enabled: boolean;
 }
@@ -523,7 +556,11 @@ export interface Profile {
   switch_count: number;
   supported_models: string[];
   supported_versions: string[];
+  version?: string;
+  evidence_level?: string;
 }
+
+export type ProfileState = "LAB_VERIFIED" | "PRODUCTION_VERIFIED" | "BLOCKED" | "DEPRECATED";
 
 export interface VerificationRecord {
   id: number;
@@ -535,6 +572,62 @@ export interface VerificationRecord {
   verified_by: string;
   verified_at: string;
   evidence: Record<string, unknown>;
+  status: ProfileState;
+  status_changed_by: string;
+  status_changed_at: string | null;
+  status_reason: string;
+  all_models: boolean;
+  effective_level: string;
+}
+
+export interface DiscoveryProfile {
+  key: string;
+  vendor: string;
+  generation: string;
+  model_families: string[];
+  aos_versions: string[];
+  command: string;
+  expected_patterns: string[];
+  parser: string;
+  safety: string;
+  sources: string[];
+  verification: string;
+  fixtures: string[];
+}
+
+export interface DiscoveryOutcome {
+  ok: boolean;
+  status: DiscoveryStatus;
+  category: string;
+  reason: string;
+  vendor: string;
+  model: string;
+  version: string;
+  discovery_profile: string;
+  profile: string | null;
+  profile_reason: string;
+  system_name: string;
+  mismatches: string[];
+  commands: string[];
+}
+
+export interface DiscoveryJob {
+  id: string;
+  status: "queued" | "running" | "completed" | "failed" | "cancelled" | "interrupted";
+  source: string;
+  created_by: string;
+  total: number;
+  processed: number;
+  discovered: number;
+  failed: number;
+  mismatched: number;
+  cancel_requested: boolean;
+  error: string;
+  results: { switch_id: number; name?: string; status: string; category?: string; model?: string; version?: string; reason?: string }[];
+  created_at: string | null;
+  started_at: string | null;
+  completed_at: string | null;
+  failed_at: string | null;
 }
 
 export interface VerificationRunResult {
@@ -544,6 +637,9 @@ export interface VerificationRunResult {
   version_prefix: string;
   aos_version: string;
   port: string;
+  transport?: string;
+  environment?: string;
+  evidence_level?: string;
   results: { command_key: string; status: string; detail?: string; output_lines?: number }[];
   passed: boolean;
   commands: string[];
@@ -613,7 +709,7 @@ export interface ImportRow {
   errors: string[];
   warnings: string[];
   diff: string[];
-  result: "" | "imported" | "updated" | "unchanged" | "skipped" | "failed" | "not_processed";
+  result: "" | "imported" | "updated" | "unchanged" | "skipped" | "failed" | "not_processed" | "rolled_back";
   message: string;
 }
 
@@ -625,6 +721,8 @@ export interface ImportJob {
   created_by: string;
   on_existing: "skip" | "update";
   skip_invalid: boolean;
+  mode: "atomic" | "per_row";
+  discovery_job_id: string | null;
   cancel_requested: boolean;
   total: number;
   valid: number;

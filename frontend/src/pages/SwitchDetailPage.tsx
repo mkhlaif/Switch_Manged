@@ -1,13 +1,28 @@
-import { ArrowLeft, CheckCircle2, KeyRound, Pencil, PlugZap, ScanSearch, Trash2, XCircle } from "lucide-react";
+import { ArrowLeft, CheckCircle2, Fingerprint, KeyRound, Pencil, PlugZap, ScanSearch, ShieldAlert, Trash2, XCircle } from "lucide-react";
 import { useState } from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
 import { api } from "../api/client";
-import type { Switch } from "../api/types";
+import type { DiscoveryOutcome, Switch } from "../api/types";
 import { useAuth } from "../auth/AuthContext";
 import { useSafetyFlags } from "../components/Layout";
 import { SwitchForm } from "../components/SwitchForm";
 import { NetBoxPanel, ZabbixPanel } from "../components/IntegrationPanels";
-import { Badge, Button, Card, CodeBlock, ErrorBanner, Field, Input, KV, Loading, Modal, Notice, PageHeader, SwitchStatusBadge } from "../components/ui";
+import {
+  Badge,
+  Button,
+  Card,
+  CodeBlock,
+  DiscoveryStatusBadge,
+  ErrorBanner,
+  Field,
+  Input,
+  KV,
+  Loading,
+  Modal,
+  Notice,
+  PageHeader,
+  SwitchStatusBadge,
+} from "../components/ui";
 import { fmtDateTime, fmtDuration } from "../lib/format";
 import { useLoader } from "../lib/hooks";
 
@@ -21,9 +36,6 @@ interface TestResult {
   version?: string;
   system_name?: string;
   commands?: string[];
-  changed?: Record<string, [string, string]>;
-  profile?: string | null;
-  profile_reason?: string;
 }
 
 export default function SwitchDetailPage() {
@@ -35,6 +47,9 @@ export default function SwitchDetailPage() {
   const { data: sw, setData, error, loading, reload } = useLoader(() => api.get<Switch>(`/api/switches/${id}`), [id]);
   const [busy, setBusy] = useState<string | null>(null);
   const [result, setResult] = useState<TestResult | null>(null);
+  const [discovery, setDiscovery] = useState<DiscoveryOutcome | null>(null);
+  const [accepting, setAccepting] = useState(false);
+  const [acceptReason, setAcceptReason] = useState("");
   const [actionError, setActionError] = useState<unknown>(null);
   const [editing, setEditing] = useState(false);
   const [hostKey, setHostKey] = useState<{ host_key: string; fingerprint: string; key_type: string; matches_trusted: boolean } | null>(null);
@@ -45,13 +60,30 @@ export default function SwitchDetailPage() {
   if (error && !sw) return <ErrorBanner error={error} onRetry={() => reload()} />;
   if (!sw) return null;
 
-  async function run(kind: "test" | "detect") {
+  async function run(kind: "test" | "discover") {
     setBusy(kind);
     setActionError(null);
     setResult(null);
+    setDiscovery(null);
     try {
-      setResult(await api.post<TestResult>(`/api/switches/${sw!.id}/${kind}`));
+      if (kind === "test") setResult(await api.post<TestResult>(`/api/switches/${sw!.id}/test`));
+      else setDiscovery(await api.post<DiscoveryOutcome>(`/api/switches/${sw!.id}/discover`));
       reload(true);
+    } catch (e) {
+      setActionError(e);
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  async function acceptIdentity() {
+    setBusy("accept");
+    setActionError(null);
+    try {
+      setData(await api.post<Switch>(`/api/switches/${sw!.id}/discovery/accept`, { reason: acceptReason.trim() }));
+      setAccepting(false);
+      setAcceptReason("");
+      setDiscovery(null);
     } catch (e) {
       setActionError(e);
     } finally {
@@ -105,7 +137,7 @@ export default function SwitchDetailPage() {
         title={sw.name}
         subtitle={
           <span className="mono">
-            {sw.host}:{sw.ssh_port} · {sw.model || "model unknown"} · AOS {sw.aos_version || "unknown"}
+            {sw.host}:{sw.ssh_port} · {sw.discovery_status === "not_discovered" ? "not discovered yet" : `${sw.model || "model unknown"} · AOS ${sw.aos_version || "unknown"}`}
           </span>
         }
         actions={
@@ -117,8 +149,8 @@ export default function SwitchDetailPage() {
             )}
             {hasRole("admin") && (
               <>
-                <Button icon={<ScanSearch className="h-4 w-4" />} loading={busy === "detect"} onClick={() => run("detect")}>
-                  Detect model / AOS
+                <Button icon={<ScanSearch className="h-4 w-4" />} loading={busy === "discover"} onClick={() => run("discover")}>
+                  Run discovery
                 </Button>
                 <Button icon={<Pencil className="h-4 w-4" />} onClick={() => setEditing(true)}>
                   Edit
@@ -137,21 +169,7 @@ export default function SwitchDetailPage() {
         {result &&
           (result.ok ? (
             <Notice tone="green" icon={<CheckCircle2 className="mt-0.5 h-5 w-5" />} title={`SSH OK (${fmtDuration(result.duration_ms)})`}>
-              Detected {result.model || "?"} running AOS {result.version || "?"}
-              {result.profile !== undefined && (
-                <span>
-                  {" "}
-                  · profile: <strong>{result.profile || "none"}</strong> ({result.profile_reason})
-                </span>
-              )}
-              {result.changed && Object.keys(result.changed).length > 0 && (
-                <div className="mt-1 text-xs">
-                  Updated:{" "}
-                  {Object.entries(result.changed)
-                    .map(([k, [a, b]]) => `${k}: ${a || "—"} → ${b}`)
-                    .join("; ")}
-                </div>
-              )}
+              The switch answered {result.model || "?"} running AOS {result.version || "?"} (connection test only; the identity is stored by discovery).
               {result.commands && (
                 <div className="mt-2">
                   <CodeBlock lines={result.commands} />
@@ -174,14 +192,91 @@ export default function SwitchDetailPage() {
             </Notice>
           ))}
 
+        {discovery && (
+          <Notice
+            tone={discovery.ok ? "green" : discovery.status === "mismatch" ? "amber" : "red"}
+            icon={discovery.ok ? <CheckCircle2 className="mt-0.5 h-5 w-5" /> : <ShieldAlert className="mt-0.5 h-5 w-5" />}
+            title={discovery.ok ? "DEVICE DISCOVERED" : discovery.status === "mismatch" ? "IDENTITY MISMATCH" : "DISCOVERY FAILED"}
+          >
+            {discovery.model ? (
+              <div>
+                {discovery.vendor} {discovery.model} · AOS <span className="mono">{discovery.version}</span> · command profile:{" "}
+                <strong>{discovery.profile || "none"}</strong>
+              </div>
+            ) : null}
+            {discovery.reason && (
+              <div>
+                <strong>{discovery.category || "Reason"}:</strong> {discovery.reason}
+              </div>
+            )}
+            {discovery.commands.length > 0 && (
+              <div className="mt-2">
+                <CodeBlock lines={discovery.commands} />
+              </div>
+            )}
+          </Notice>
+        )}
+
+        <Card
+          title={
+            <span className="flex items-center gap-2">
+              <Fingerprint className="h-4 w-4" /> Device identity (automatic discovery)
+            </span>
+          }
+          actions={
+            hasRole("admin") &&
+            sw.discovery_status === "mismatch" && (
+              <Button size="sm" variant="primary" onClick={() => setAccepting(true)}>
+                Review and accept identity
+              </Button>
+            )
+          }
+        >
+          {sw.discovery_status === "mismatch" && (
+            <Notice tone="amber" title="State-changing operations are blocked">
+              The device no longer matches the expected or previously discovered identity: {sw.discovery_error}. Read-only operations continue.
+              An administrator must review the change (e.g. an AOS upgrade or a replaced switch) before any restart is possible.
+            </Notice>
+          )}
+          {sw.discovery_status === "discovery_failed" && (
+            <Notice tone="red" title={`Discovery failed${sw.discovery_category ? ` (${sw.discovery_category})` : ""}`}>
+              {sw.discovery_error || "The device could not be identified."} No operation other than discovery is possible until it succeeds.
+            </Notice>
+          )}
+          {sw.discovery_status === "not_discovered" && (
+            <Notice tone="blue" title="Not discovered yet">
+              {sw.discovery_error ||
+                "Discovery runs automatically once the switch can be reached securely (trusted SSH host key or a fingerprint supplied out of band), or on the first search."}
+            </Notice>
+          )}
+          <dl className="mt-4 grid grid-cols-2 gap-5 sm:grid-cols-4">
+            <KV label="Status">
+              <DiscoveryStatusBadge status={sw.discovery_status} />
+            </KV>
+            <KV label="Vendor">{sw.vendor === "ALE" ? "Alcatel-Lucent Enterprise" : sw.vendor || "—"}</KV>
+            <KV label="Model">{sw.model || "—"}</KV>
+            <KV label="AOS version" mono>{sw.aos_version || "—"}</KV>
+            <KV label="Discovered">{fmtDateTime(sw.discovered_at)}</KV>
+            <KV label="Discovery profile" mono>{sw.discovery_profile || "—"}</KV>
+            <KV label="System name" mono>{sw.system_name || "—"}</KV>
+            <KV label="Environment">
+              <Badge tone={sw.environment === "production" ? "violet" : "slate"}>{sw.environment}</Badge>
+            </KV>
+            <KV label="Expected model">{sw.expected_model || "—"}</KV>
+            <KV label="Expected AOS" mono>{sw.expected_aos_version || "—"}</KV>
+            <KV label="Expected host key" mono>{sw.expected_host_key_fingerprint ? `…${sw.expected_host_key_fingerprint.slice(-12)}` : "—"}</KV>
+            <KV label="Serial number">
+              <span className="text-xs font-normal text-slate-500">not collected (no verified command)</span>
+            </KV>
+          </dl>
+        </Card>
+
         <div className="grid gap-6 xl:grid-cols-3">
           <Card title="Switch" className="xl:col-span-2">
             <dl className="grid grid-cols-2 gap-5 sm:grid-cols-3">
               <KV label="Name">{sw.name}</KV>
               <KV label="IP / hostname" mono>{sw.host}</KV>
               <KV label="SSH port" mono>{sw.ssh_port}</KV>
-              <KV label="Model">{sw.model || "unknown"}</KV>
-              <KV label="AOS version" mono>{sw.aos_version || "unknown"}</KV>
               <KV label="Command profile">
                 {sw.effective_profile ? <Badge tone="teal">{sw.effective_profile}</Badge> : <Badge tone="violet">none</Badge>}
                 <div className="mt-1 text-xs font-normal text-slate-500">{sw.profile_reason}</div>
@@ -313,6 +408,32 @@ export default function SwitchDetailPage() {
           }}
         />
       )}
+      <Modal
+        open={accepting}
+        onClose={() => setAccepting(false)}
+        title={`Accept the discovered identity of ${sw.name}?`}
+        footer={
+          <>
+            <Button onClick={() => setAccepting(false)}>Cancel</Button>
+            <Button variant="primary" disabled={acceptReason.trim().length < 3} loading={busy === "accept"} onClick={acceptIdentity}>
+              Accept identity
+            </Button>
+          </>
+        }
+      >
+        <div className="space-y-3 text-sm">
+          <p>
+            Discovered: <strong>{sw.model}</strong> · AOS <span className="mono">{sw.aos_version}</span>. Difference: {sw.discovery_error}
+          </p>
+          <p>
+            Accepting makes this the expected identity. It is audited, and the identity is checked again on the switch before every restart.
+            Command profiles still have to be verified for this model and AOS version.
+          </p>
+          <Field label="Reason (audited)">
+            <Input value={acceptReason} onChange={(e) => setAcceptReason(e.target.value)} placeholder="AOS upgraded to 8.10R2 (change CHG-1234)" />
+          </Field>
+        </div>
+      </Modal>
       <Modal
         open={deleting}
         onClose={() => setDeleting(false)}

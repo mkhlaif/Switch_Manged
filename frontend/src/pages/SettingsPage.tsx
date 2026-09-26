@@ -1,7 +1,19 @@
 import { BookCheck, FlaskConical, KeyRound, LogOut as LogOutIcon, Plug, Plus, ShieldAlert, SlidersHorizontal, Trash2, UserCog, Users } from "lucide-react";
 import { useState, type ReactNode } from "react";
 import { api } from "../api/client";
-import type { Credential, IntegrationStatus, Profile, Role, SettingsResponse, Switch, User, VerificationRecord, VerificationRunResult } from "../api/types";
+import type {
+  Credential,
+  DiscoveryProfile,
+  IntegrationStatus,
+  Profile,
+  ProfileState,
+  Role,
+  SettingsResponse,
+  Switch,
+  User,
+  VerificationRecord,
+  VerificationRunResult,
+} from "../api/types";
 import { useAuth } from "../auth/AuthContext";
 import { Badge, Button, Card, ErrorBanner, Field, Input, Loading, Modal, Notice, PageHeader, Select, Table, Td, Th, Toggle, cx } from "../components/ui";
 import { fmtDateTime, fmtRelative } from "../lib/format";
@@ -201,15 +213,31 @@ function NumberSetting({ label, value, def, disabled, onSave }: { label: string;
 
 /* ------------------------------------------------------------------ Profiles */
 const VERIF_TONE: Record<string, "green" | "teal" | "blue" | "red"> = { doc_example: "green", doc_syntax: "teal", lab_verified: "blue", unverified: "red" };
+const STATE_TONE: Record<string, "green" | "blue" | "red" | "slate"> = {
+  PRODUCTION_VERIFIED: "green",
+  LAB_VERIFIED: "blue",
+  BLOCKED: "red",
+  DEPRECATED: "slate",
+};
+// Allowed profile-state transitions (the server enforces the same rules and the evidence).
+const TRANSITIONS: Record<ProfileState, ProfileState[]> = {
+  LAB_VERIFIED: ["PRODUCTION_VERIFIED", "BLOCKED", "DEPRECATED"],
+  PRODUCTION_VERIFIED: ["LAB_VERIFIED", "BLOCKED", "DEPRECATED"],
+  BLOCKED: ["LAB_VERIFIED", "DEPRECATED"],
+  DEPRECATED: ["LAB_VERIFIED"],
+};
+const PREFIX_RE = /^\d{1,2}\.\d{1,3}(\.\d{1,3}){0,2}$/;
 
 function ProfilesTab() {
   const { hasRole } = useAuth();
   const isAdmin = hasRole("admin");
   const { data, setData, error, loading, reload } = useLoader(() =>
-    api.get<{ profiles: Profile[]; verifications: VerificationRecord[]; capabilities: string[] }>("/api/profiles"),
+    api.get<{ profiles: Profile[]; verifications: VerificationRecord[]; capabilities: string[]; discovery_profiles: DiscoveryProfile[] }>("/api/profiles"),
   );
   const [verifyFor, setVerifyFor] = useState<{ profile: Profile; capability: string } | null>(null);
-  const [form, setForm] = useState({ model_family: "*", version_prefix: "", notes: "" });
+  const [form, setForm] = useState({ model_family: "", version_prefix: "", notes: "" });
+  const [stateFor, setStateFor] = useState<VerificationRecord | null>(null);
+  const [stateForm, setStateForm] = useState<{ status: ProfileState | ""; reason: string }>({ status: "", reason: "" });
   const [actionError, setActionError] = useState<unknown>(null);
   const [cloning, setCloning] = useState<Profile | null>(null);
   const [cloneKey, setCloneKey] = useState("");
@@ -236,12 +264,15 @@ function ProfilesTab() {
     }
   }
 
-  async function revoke(v: VerificationRecord) {
-    if (!confirm(`Revoke ${v.capability} verification for ${v.model_family} AOS ${v.version_prefix}?`)) return;
+  async function changeState() {
     setActionError(null);
     try {
-      const r = await api.del<{ verifications: VerificationRecord[] }>(`/api/profiles/verifications/${v.id}`);
+      const r = await api.post<{ verifications: VerificationRecord[] }>(`/api/profiles/verifications/${stateFor!.id}/status`, {
+        status: stateForm.status,
+        reason: stateForm.reason.trim(),
+      });
       setData({ ...data!, verifications: r.verifications });
+      setStateFor(null);
     } catch (e) {
       setActionError(e);
     }
@@ -266,15 +297,27 @@ function ProfilesTab() {
     const list = records(profile.key, capability);
     return (
       <div className="flex flex-wrap items-center gap-1">
-        {list.length === 0 && <span className="text-xs text-slate-500">not lab-verified</span>}
+        {list.length === 0 && <span className="text-xs text-slate-500">DRAFT — not verified</span>}
         {list.map((v) => (
-          <Badge key={v.id} tone="green">
-            <span title={`${v.verified_by} · ${fmtDateTime(v.verified_at)}${v.notes ? " · " + v.notes : ""}`}>
-              {v.model_family === "*" ? "all models" : v.model_family} · {v.version_prefix}
+          <Badge key={v.id} tone={STATE_TONE[v.status] || "slate"}>
+            <span
+              title={`${v.status}${v.all_models ? " (all models: counts as LAB_VERIFIED at most)" : ""} · ${v.verified_by} · ${fmtDateTime(v.verified_at)}${
+                v.status_reason ? " · " + v.status_reason : ""
+              }${v.notes ? " · " + v.notes : ""}`}
+            >
+              {v.all_models ? "all models" : v.model_family} · {v.version_prefix} · {v.effective_level.replace("_VERIFIED", "").toLowerCase()}
             </span>
             {isAdmin && (
-              <button onClick={() => revoke(v)} className="ml-1 opacity-60 hover:opacity-100" aria-label="Revoke">
-                ×
+              <button
+                onClick={() => {
+                  setStateFor(v);
+                  setStateForm({ status: "", reason: "" });
+                  setActionError(null);
+                }}
+                className="ml-1 opacity-60 hover:opacity-100"
+                aria-label={`Change state of ${v.capability} ${v.model_family} ${v.version_prefix}`}
+              >
+                ⋯
               </button>
             )}
           </Badge>
@@ -285,7 +328,7 @@ function ProfilesTab() {
             variant="ghost"
             onClick={() => {
               setVerifyFor({ profile, capability });
-              setForm({ model_family: "*", version_prefix: "", notes: "" });
+              setForm({ model_family: profile.supported_models[0] || "", version_prefix: "", notes: "" });
             }}
           >
             + Record
@@ -298,8 +341,49 @@ function ProfilesTab() {
   return (
     <div className="space-y-6">
       <Notice tone="blue" title="How commands are verified">
-        Built-in profiles were verified against the ALE OmniSwitch CLI Reference Guides (each command shows its source, who verified it and when). Documentation alone never enables execution on production switches: an administrator must <strong>lab-verify</strong> each capability per <strong>model family and AOS version</strong> — READ for the read-only commands, and every restart strategy separately. Without a matching record the switch shows “Command profile unavailable for this switch model/version”. See <span className="mono">docs/AOS_COMMAND_VERIFICATION.md</span>.
+        Built-in commands come from the ALE OmniSwitch CLI Reference Guides and are tested against documented output fixtures (evidence level{" "}
+        <strong>FIXTURE_TESTED</strong>). That never enables execution on its own. Each capability — READ for the read-only commands and every restart strategy
+        separately — has a state per <strong>model family and AOS version</strong>: no record = <strong>DRAFT</strong> (unusable), <strong>LAB_VERIFIED</strong> (lab
+        switches and reads), <strong>PRODUCTION_VERIFIED</strong> (state changes on production switches — requires recorded evidence from a real lab switch),{" "}
+        <strong>BLOCKED</strong> or <strong>DEPRECATED</strong>. Simulator runs are SIMULATED evidence and are never recorded. See{" "}
+        <span className="mono">docs/ALCATEL_COMMAND_PROFILES.md</span>.
       </Notice>
+      {data.discovery_profiles?.length > 0 && (
+        <Card title="Discovery Profile Registry (identifies a switch before any other command)" padded={false}>
+          <Table>
+            <thead>
+              <tr>
+                <Th>Entry</Th>
+                <Th>Command</Th>
+                <Th>Identifies</Th>
+                <Th>Expected output</Th>
+                <Th>Source</Th>
+              </tr>
+            </thead>
+            <tbody>
+              {data.discovery_profiles.map((d) => (
+                <tr key={d.key}>
+                  <Td mono>{d.key}</Td>
+                  <Td mono>
+                    {d.command} <Badge tone="green">{d.safety}</Badge>
+                  </Td>
+                  <Td className="text-xs">
+                    {d.vendor} {d.generation}: <span className="mono">{d.model_families.join(", ")}</span> · AOS <span className="mono">{d.aos_versions.join(", ")}</span>
+                  </Td>
+                  <Td mono className="text-xs">
+                    {d.expected_patterns.map((pat) => (
+                      <div key={pat}>{pat}</div>
+                    ))}
+                  </Td>
+                  <Td className="text-xs text-slate-500">
+                    {d.sources.join("; ")} <Badge tone={VERIF_TONE[d.verification] || "red"}>{d.verification}</Badge>
+                  </Td>
+                </tr>
+              ))}
+            </tbody>
+          </Table>
+        </Card>
+      )}
       {isAdmin && (
         <div>
           <Button icon={<FlaskConical className="h-4 w-4" />} onClick={() => setRunOpen(true)}>
@@ -317,6 +401,8 @@ function ProfilesTab() {
               {p.builtin ? <Badge tone="teal">built-in</Badge> : <Badge tone="violet">custom</Badge>}
               {!p.enabled && <Badge tone="red">disabled</Badge>}
               <Badge>{p.switch_count} switches</Badge>
+              {p.evidence_level && <Badge tone="blue">{p.evidence_level}</Badge>}
+              {p.version && <span className="mono text-xs font-normal text-slate-500">v{p.version}</span>}
             </span>
           }
           actions={
@@ -347,7 +433,7 @@ function ProfilesTab() {
               </span>
             </div>
             <div className="flex flex-wrap items-center gap-2 text-xs">
-              <span className="font-semibold uppercase tracking-wide text-slate-500">Read commands lab-verified for</span>
+              <span className="font-semibold uppercase tracking-wide text-slate-500">Read commands verified for</span>
               <VerifiedBadges profile={p} capability="READ" />
             </div>
           </div>
@@ -394,7 +480,7 @@ function ProfilesTab() {
                   <Th>Restart strategy</Th>
                   <Th>Commands</Th>
                   <Th>Documentation</Th>
-                  <Th>Lab-verified for</Th>
+                  <Th>Profile state per model / AOS</Th>
                 </tr>
               </thead>
               <tbody>
@@ -429,8 +515,8 @@ function ProfilesTab() {
         footer={
           <>
             <Button onClick={() => setVerifyFor(null)}>Cancel</Button>
-            <Button variant="primary" disabled={!/^\d{1,2}(\.\d{1,3}){0,3}$/.test(form.version_prefix.trim())} onClick={addVerification}>
-              Record verification
+            <Button variant="primary" disabled={!form.model_family || !PREFIX_RE.test(form.version_prefix.trim())} onClick={addVerification}>
+              Record LAB_VERIFIED
             </Button>
           </>
         }
@@ -441,15 +527,14 @@ function ProfilesTab() {
               ? "Prefer the automated read-only verification run, which checks every command's output contract."
               : "Prepare a dry run on a lab switch of this model family and AOS version, run the two displayed commands by hand on the lab switch console and confirm the port went down and came back up. Then record it here; the application executes the strategy only for recorded model families and versions."}
           </Notice>
-          <Field label="Model family" hint="“all models” applies to every supported model of the profile">
+          <Field label="Model family" hint="The exact model family tested. Nobody verifies every model at once.">
             <Select value={form.model_family} onChange={(e) => setForm({ ...form, model_family: e.target.value })}>
-              <option value="*">all models</option>
               {verifyFor?.profile.supported_models.map((m) => (
                 <option key={m}>{m}</option>
               ))}
             </Select>
           </Field>
-          <Field label="AOS version prefix" hint={`Must belong to ${verifyFor?.profile.key} (${verifyFor?.profile.version_prefixes.join(", ")}). Example: 8.10 or 6.7`}>
+          <Field label="AOS version (major.minor at least)" hint={`Must belong to ${verifyFor?.profile.key} (${verifyFor?.profile.version_prefixes.join(", ")}). Example: 8.10 or 6.7`}>
             <Input className="mono" value={form.version_prefix} onChange={(e) => setForm({ ...form, version_prefix: e.target.value })} placeholder="8.10" />
           </Field>
           <Field label="Evidence / notes">
@@ -457,6 +542,57 @@ function ProfilesTab() {
           </Field>
           <ErrorBanner error={actionError} />
         </div>
+      </Modal>
+
+      <Modal
+        open={!!stateFor}
+        onClose={() => setStateFor(null)}
+        title={`Profile state: ${stateFor?.profile_key} · ${stateFor?.capability} · ${stateFor?.model_family} AOS ${stateFor?.version_prefix}`}
+        footer={
+          <>
+            <Button onClick={() => setStateFor(null)}>Cancel</Button>
+            <Button variant="primary" disabled={!stateForm.status || stateForm.reason.trim().length < 3} onClick={changeState}>
+              Change state
+            </Button>
+          </>
+        }
+      >
+        {stateFor && (
+          <div className="space-y-4 text-sm">
+            <p>
+              Current state: <Badge tone={STATE_TONE[stateFor.status] || "slate"}>{stateFor.status}</Badge>
+              {stateFor.status_changed_by && (
+                <span className="text-xs text-slate-500">
+                  {" "}
+                  by {stateFor.status_changed_by} · {fmtDateTime(stateFor.status_changed_at)} · {stateFor.status_reason}
+                </span>
+              )}
+            </p>
+            <Field label="New state">
+              <Select value={stateForm.status} onChange={(e) => setStateForm({ ...stateForm, status: e.target.value as ProfileState })}>
+                <option value="">Select…</option>
+                {TRANSITIONS[stateFor.status].map((t) => (
+                  <option key={t} value={t} disabled={t === "PRODUCTION_VERIFIED" && stateFor.all_models}>
+                    {t}
+                    {t === "DEPRECATED" ? " (revoke, kept for history)" : ""}
+                  </option>
+                ))}
+              </Select>
+            </Field>
+            {stateForm.status === "PRODUCTION_VERIFIED" && (
+              <Notice tone="amber" title="Evidence from a real switch is required">
+                {stateFor.capability === "READ"
+                  ? "A passed read-only verification run on a real (SSH) switch of this model family and AOS version must be recorded."
+                  : `A live ${stateFor.capability} restart on a real (SSH) switch of this model family and AOS version whose post-restart verification succeeded must be recorded.`}{" "}
+                The server checks it; nothing is promoted automatically.
+              </Notice>
+            )}
+            <Field label="Reason (audited)">
+              <Input value={stateForm.reason} onChange={(e) => setStateForm({ ...stateForm, reason: e.target.value })} placeholder="Validated on lab switch LAB-6860-01, change CHG-1234" />
+            </Field>
+            <ErrorBanner error={actionError} />
+          </div>
+        )}
       </Modal>
 
       {runOpen && (
@@ -529,8 +665,8 @@ function VerificationRunModal({ onClose, onRecorded }: { onClose: () => void; on
           <Button onClick={() => run(false)} loading={busy} disabled={!switchId || !port.trim()}>
             Run checks
           </Button>
-          <Button variant="primary" onClick={() => run(true)} loading={busy} disabled={!result?.passed}>
-            Record READ verification
+          <Button variant="primary" onClick={() => run(true)} loading={busy} disabled={!result?.passed || result?.transport === "simulator"}>
+            Record READ as LAB_VERIFIED
           </Button>
         </>
       }
@@ -545,7 +681,7 @@ function VerificationRunModal({ onClose, onRecorded }: { onClose: () => void; on
               <option value="">Select…</option>
               {switches.data?.map((s) => (
                 <option key={s.id} value={s.id}>
-                  {s.name} ({s.model || "?"} · {s.aos_version || "?"})
+                  {s.name} ({s.discovery_status === "discovered" ? `${s.model} · ${s.aos_version}` : "not discovered"})
                 </option>
               ))}
             </Select>
@@ -565,6 +701,7 @@ function VerificationRunModal({ onClose, onRecorded }: { onClose: () => void; on
               <span>
                 {result.profile} on {result.model_family} AOS {result.aos_version}
               </span>
+              {result.evidence_level && <Badge tone={result.evidence_level === "SIMULATED" ? "slate" : "blue"}>{result.evidence_level}</Badge>}
             </div>
             <ul className="space-y-1 text-xs">
               {result.results.map((r) => (

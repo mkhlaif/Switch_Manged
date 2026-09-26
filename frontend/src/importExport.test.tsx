@@ -96,7 +96,13 @@ describe("import dialog", () => {
     expect(screen.getByText("management_ip 'x' is not a valid IPv4/IPv6 address.")).toBeTruthy();
 
     const confirm = screen.getByRole("button", { name: /confirm import of 2 switches/i }) as HTMLButtonElement;
-    expect(confirm.disabled).toBe(true); // invalid rows not acknowledged yet
+    // Default mode is all-or-nothing: a file with an invalid row can never be imported.
+    expect(confirm.disabled).toBe(true);
+    expect(screen.getByText("The file has invalid rows")).toBeTruthy();
+    expect(screen.queryByLabelText(/skip the 2 invalid\/duplicate rows/i)).toBeNull();
+    // Row-by-row is an explicit choice, and skipping must still be acknowledged.
+    fireEvent.change(screen.getByLabelText("Import mode"), { target: { value: "per_row" } });
+    expect(confirm.disabled).toBe(true);
     fireEvent.click(screen.getByLabelText(/skip the 2 invalid\/duplicate rows/i));
     expect(confirm.disabled).toBe(false);
 
@@ -106,7 +112,7 @@ describe("import dialog", () => {
     await act(async () => {
       fireEvent.click(confirm);
     });
-    expect(post).toHaveBeenLastCalledWith("/api/switches/import/job-1/confirm", { on_existing: "skip", skip_invalid: true });
+    expect(post).toHaveBeenLastCalledWith("/api/switches/import/job-1/confirm", { on_existing: "skip", skip_invalid: true, mode: "per_row" });
     await waitFor(() => expect(screen.getByTestId("import-imported").textContent).toBe("2"));
     expect(get).toHaveBeenCalledWith("/api/switches/import/job-1", { rows: false });
     expect(onImported).toHaveBeenCalled();

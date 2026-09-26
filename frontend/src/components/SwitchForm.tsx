@@ -8,8 +8,10 @@ interface FormState {
   host: string;
   hostname: string;
   ssh_port: number;
-  model: string;
-  aos_version: string;
+  expected_model: string;
+  expected_aos_version: string;
+  expected_host_key_fingerprint: string;
+  environment: "production" | "lab";
   site: string;
   location: string;
   port_locations: string;
@@ -29,8 +31,10 @@ function toForm(s?: Switch): FormState {
     host: s?.host || "",
     hostname: s?.hostname || "",
     ssh_port: s?.ssh_port || 22,
-    model: s?.model || "",
-    aos_version: s?.aos_version || "",
+    expected_model: s?.expected_model || "",
+    expected_aos_version: s?.expected_aos_version || "",
+    expected_host_key_fingerprint: s?.expected_host_key_fingerprint || "",
+    environment: s?.environment || "production",
     site: s?.site || "",
     location: s?.location || "",
     port_locations: Object.entries(s?.port_locations || {})
@@ -132,11 +136,38 @@ export function SwitchForm({ existing, labMode, onClose, onSaved }: { existing?:
             ))}
           </Select>
         </Field>
-        <Field label="Model" hint="Leave empty to detect with 'show system'.">
-          <Input value={form.model} onChange={(e) => set("model", e.target.value)} placeholder="OS6450-P24" />
+        <div className="rounded-lg border border-slate-200 bg-slate-50 p-3 text-sm text-slate-600 sm:col-span-2 dark:border-slate-800 dark:bg-slate-900 dark:text-slate-300">
+          Vendor, model and AOS version are <strong>discovered automatically</strong> from the switch (read-only{" "}
+          <span className="mono">show system</span>). You never type them. Optional expected values below are only compared with what
+          discovery finds: a difference blocks every state-changing operation until an administrator reviews it.
+          {existing && existing.discovery_status === "discovered" && (
+            <div className="mt-1 text-xs">
+              Discovered: <span className="mono">{existing.model}</span> · AOS <span className="mono">{existing.aos_version}</span>
+            </div>
+          )}
+        </div>
+        <Field label="Expected model (optional)" hint="Compared with the discovered model family, e.g. OS6450-P24.">
+          <Input value={form.expected_model} onChange={(e) => set("expected_model", e.target.value)} placeholder="OS6450-P24" />
         </Field>
-        <Field label="AOS version" hint="e.g. 6.7.2.191.R08 or 8.10.94.R03. Empty = detect.">
-          <Input value={form.aos_version} onChange={(e) => set("aos_version", e.target.value)} className="mono" />
+        <Field label="Expected AOS version (optional)" hint="Compared on major.minor, e.g. 8.10R1 or 6.7.1.">
+          <Input value={form.expected_aos_version} onChange={(e) => set("expected_aos_version", e.target.value)} className="mono" />
+        </Field>
+        <Field
+          label="Expected SSH host-key fingerprint (optional)"
+          hint="SHA256:… read on the switch console. When it matches, the key is trusted and discovery runs automatically."
+        >
+          <Input
+            value={form.expected_host_key_fingerprint}
+            onChange={(e) => set("expected_host_key_fingerprint", e.target.value)}
+            placeholder="SHA256:…"
+            className="mono"
+          />
+        </Field>
+        <Field label="Environment" hint="Production switches need PRODUCTION_VERIFIED command profiles for any state change.">
+          <Select value={form.environment} onChange={(e) => set("environment", e.target.value as "production" | "lab")}>
+            <option value="production">Production</option>
+            <option value="lab">Lab</option>
+          </Select>
         </Field>
         <Field label="Site">
           <Input value={form.site} onChange={(e) => set("site", e.target.value)} placeholder="Main campus" />
@@ -144,7 +175,7 @@ export function SwitchForm({ existing, labMode, onClose, onSaved }: { existing?:
         <Field label="Location">
           <Input value={form.location} onChange={(e) => set("location", e.target.value)} placeholder="Building A / Floor 2" />
         </Field>
-        <Field label="Command profile" hint="Automatic selects the verified profile from the AOS version.">
+        <Field label="Command profile" hint="Automatic selects the verified profile from the discovered model and AOS version.">
           <Select value={form.profile_key} onChange={(e) => set("profile_key", e.target.value)}>
             <option value="">Automatic</option>
             {profiles.map((p) => (
@@ -164,7 +195,7 @@ export function SwitchForm({ existing, labMode, onClose, onSaved }: { existing?:
           </Select>
         </Field>
         <div className="sm:col-span-2">
-          <Field label="Uplink / trunk ports" hint="Comma-separated (e.g. 1/1/49, 1/1/50 or 1/25). These are always classified TRUNK and can never be restarted.">
+          <Field label="Uplink / trunk ports" hint="Comma-separated (e.g. 1/1/49, 1/1/50 or 1/25). These are always classified UPLINK and can never be restarted.">
             <Input value={form.uplink_ports} onChange={(e) => set("uplink_ports", e.target.value)} className="mono" />
           </Field>
         </div>

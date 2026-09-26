@@ -147,6 +147,12 @@ export const CLASS_LABEL: Record<string, string> = {
   UNKNOWN: "UNKNOWN",
   LIKELY_TRUNK: "LIKELY TRUNK",
   TRUNK: "TRUNK",
+  UPLINK: "UPLINK",
+  LAG: "LINK AGGREGATE",
+  CORE: "CORE",
+  DISTRIBUTION: "DISTRIBUTION",
+  MANAGEMENT: "MANAGEMENT",
+  STACK: "STACK",
 };
 const CLASS_TONE: Record<string, Tone> = {
   ACCESS: "green",
@@ -154,6 +160,12 @@ const CLASS_TONE: Record<string, Tone> = {
   UNKNOWN: "slate",
   LIKELY_TRUNK: "orange",
   TRUNK: "red",
+  UPLINK: "red",
+  LAG: "red",
+  CORE: "red",
+  DISTRIBUTION: "red",
+  MANAGEMENT: "red",
+  STACK: "red",
 };
 
 export function ClassBadge({ value, confidence, large }: { value: PortClass | string; confidence?: string; large?: boolean }) {
@@ -175,6 +187,18 @@ const STATUS_STYLE: Record<string, { tone: Tone; label: string; dot: string }> =
   unknown: { tone: "slate", label: "Not checked", dot: "bg-slate-400" },
 };
 
+const DISCOVERY_STYLE: Record<string, { tone: Tone; label: string }> = {
+  discovered: { tone: "green", label: "Discovered" },
+  not_discovered: { tone: "slate", label: "Not discovered" },
+  discovery_failed: { tone: "red", label: "Discovery failed" },
+  mismatch: { tone: "orange", label: "Identity mismatch" },
+};
+
+export function DiscoveryStatusBadge({ status }: { status: string }) {
+  const s = DISCOVERY_STYLE[status] || DISCOVERY_STYLE.not_discovered;
+  return <Badge tone={s.tone}>{s.label}</Badge>;
+}
+
 export function SwitchStatusBadge({ status }: { status: SwitchStatus | string }) {
   const s = STATUS_STYLE[status] || STATUS_STYLE.unknown;
   return (
@@ -194,6 +218,7 @@ const RESULT_STYLE: Record<string, { tone: Tone; label: string }> = {
   connection_failed: { tone: "red", label: "Connection failed" },
   command_failed: { tone: "orange", label: "Command failed" },
   unsupported: { tone: "violet", label: "No profile" },
+  discovery_failed: { tone: "violet", label: "Discovery failed" },
   blocked: { tone: "red", label: "Blocked" },
   error: { tone: "red", label: "Error" },
   running: { tone: "blue", label: "Checking…" },
