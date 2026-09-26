@@ -12,6 +12,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.csv_safe import csv_row
 from app.core.permissions import Permission
+from app.core.ratelimit import limiter
 from app.api.deps import require
 from app.db.session import get_db
 from app.models import AuditLog, User
@@ -64,7 +65,8 @@ async def export_audit(action: str | None = None, user: str | None = None,
                        result: str | None = None, since: datetime | None = None,
                        until: datetime | None = None, q: str | None = None,
                        severity: str | None = None,
-                       _: User = Depends(require(Permission.VIEW_AUDIT)), db: AsyncSession = Depends(get_db)):
+                       viewer: User = Depends(require(Permission.VIEW_AUDIT)), db: AsyncSession = Depends(get_db)):
+    limiter.hit(f"audit-export:{viewer.id}", limit=5, window_seconds=60)
     rows = (await db.execute(_query(action, user, result, since, until, q, severity)
                              .order_by(AuditLog.ts.desc()).limit(50000))).scalars().all()
     buf = io.StringIO()

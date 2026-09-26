@@ -11,6 +11,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.csv_safe import csv_cell
 from app.core.permissions import Permission
+from app.core.ratelimit import limiter
 from app.api.deps import require
 from app.core.errors import ValidationFailedError
 from app.db.session import get_db
@@ -89,7 +90,8 @@ async def history(mac: str | None = None, user: str | None = None,
 @router.get("/export")
 async def export_history(mac: str | None = None, user: str | None = None,
                          since: datetime | None = None, until: datetime | None = None,
-                         _: User = Depends(require(Permission.VIEW_HISTORY)), db: AsyncSession = Depends(get_db)):
+                         viewer: User = Depends(require(Permission.VIEW_HISTORY)), db: AsyncSession = Depends(get_db)):
+    limiter.hit(f"history-export:{viewer.id}", limit=5, window_seconds=60)
     base = _filters(select(MacSearch), mac, user, since, until)
     searches = (await db.execute(base.order_by(MacSearch.created_at.desc()).limit(10000)
                                  )).scalars().all()

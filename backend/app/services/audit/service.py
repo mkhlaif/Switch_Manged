@@ -7,6 +7,7 @@ the application never issues either.
 
 from __future__ import annotations
 
+import json
 from typing import Any
 
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -18,6 +19,20 @@ log = get_logger("audit")
 
 _SECRET_KEYS = {"password", "new_password", "current_password", "secret", "token",
                 "host_key_private", "private_key", "api_token", "netbox_token", "zabbix_token"}
+
+
+MAX_JSON_BYTES = 64_000
+
+
+def _bounded(value: dict | None) -> dict | None:
+    """Oversized details/state (e.g. a huge crafted value) are cut, never rejected: the audit
+    entry itself must always be written."""
+    if value is None:
+        return None
+    text = json.dumps(value, default=str)
+    if len(text) <= MAX_JSON_BYTES:
+        return value
+    return {"truncated": True, "original_bytes": len(text), "preview": text[:MAX_JSON_BYTES // 2]}
 
 
 def scrub(value: Any) -> Any:
@@ -62,18 +77,18 @@ async def record(
 ) -> AuditLog:
     entry = AuditLog(
         user_id=getattr(user, "id", None),
-        username=username or getattr(user, "username", "") or "system",
-        action=action,
-        result=result,
-        target_type=target_type,
-        target_id=str(target_id) if target_id is not None else "",
-        target_label=target_label,
-        mac=mac,
-        switch_name=switch_name,
-        port=port,
+        username=(username or getattr(user, "username", "") or "system")[:64],
+        action=action[:48],
+        result=result[:16],
+        target_type=target_type[:32],
+        target_id=(str(target_id) if target_id is not None else "")[:64],
+        target_label=(target_label or "")[:255],
+        mac=(mac or "")[:12],
+        switch_name=(switch_name or "")[:128],
+        port=(port or "")[:32],
         message=message[:1024],
-        details=scrub(details or {}),
-        ip=ip,
+        details=_bounded(scrub(details or {})),
+        ip=(ip or "")[:64],
         severity=severity if severity in {"INFO", "WARNING", "HIGH", "CRITICAL"} else "INFO",
         role=(role if role is not None else str(getattr(user, "role", "") or ""))[:16],
         operation=operation[:32],
@@ -83,8 +98,8 @@ async def record(
         risk_level=risk_level[:16],
         approval=approval[:128],
         error=error[:1024],
-        before_state=scrub(before_state) if before_state is not None else None,
-        after_state=scrub(after_state) if after_state is not None else None,
+        before_state=_bounded(scrub(before_state)) if before_state is not None else None,
+        after_state=_bounded(scrub(after_state)) if after_state is not None else None,
     )
     db.add(entry)
     if commit:

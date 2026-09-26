@@ -11,6 +11,10 @@
 #
 # Redis is intentionally NOT used: one backend process owns search jobs, the SSH concurrency
 # limit and live progress (see README "Why no Redis").
+#
+# Hardening: no container runs as root (PostgreSQL drops to the postgres user itself), no new
+# privileges, capabilities dropped where not needed, read-only backend filesystem, memory/PID
+# limits, and two networks — the web proxy cannot reach the database at all.
 
 name: omniswitch-mac-locator
 
@@ -24,6 +28,10 @@ services:
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?Set POSTGRES_PASSWORD in .env}
     volumes:
       - pgdata:/var/lib/postgresql/data
+    networks: [data]
+    security_opt: ["no-new-privileges:true"]
+    mem_limit: ${POSTGRES_MEMORY_LIMIT:-1g}
+    pids_limit: 200
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
       interval: 5s
@@ -70,7 +78,20 @@ services:
       INTEGRATION_TIMEOUT: ${INTEGRATION_TIMEOUT:-10}
       LOG_LEVEL: ${LOG_LEVEL:-INFO}
       LOG_FORMAT: ${LOG_FORMAT:-text}
-    # Not published: only reachable through the frontend reverse proxy.
+      # Database pool and timeouts (bounded; see docs/DATABASE.md).
+      DB_POOL_SIZE: ${DB_POOL_SIZE:-10}
+      DB_MAX_OVERFLOW: ${DB_MAX_OVERFLOW:-10}
+      DB_POOL_TIMEOUT: ${DB_POOL_TIMEOUT:-30}
+      DB_STATEMENT_TIMEOUT: ${DB_STATEMENT_TIMEOUT:-60}
+    # Not published: only reachable through the frontend reverse proxy. "edge" also carries
+    # the outbound SSH connections to the switches; "data" is the database network.
+    networks: [edge, data]
+    read_only: true
+    tmpfs: ["/tmp:size=64m"]
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    mem_limit: ${BACKEND_MEMORY_LIMIT:-1g}
+    pids_limit: 300
     healthcheck:
       test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/api/health', timeout=3)"]
       interval: 10s
@@ -97,6 +118,11 @@ services:
     volumes:
       # For NGINX_SITE=https.conf place tls.crt and tls.key in ./certs
       - ./certs:/etc/nginx/certs:ro
+    networks: [edge]
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+    mem_limit: ${FRONTEND_MEMORY_LIMIT:-256m}
+    pids_limit: 100
     healthcheck:
       test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:8080/nginx-health"]
       interval: 15s
@@ -111,6 +137,14 @@ services:
     profiles: ["lab"]
     restart: unless-stopped
     command: ["python", "-m", "app.simulator.ssh_server", "--host", "0.0.0.0", "--base-port", "2201", "--key", "/tmp/sim_host_key"]
+    networks: [edge]
+    cap_drop: [ALL]
+    security_opt: ["no-new-privileges:true"]
+
+networks:
+  edge: {}
+  data:
+    internal: true   # no route outside: only the backend and PostgreSQL are attached
 
 volumes:
   pgdata:

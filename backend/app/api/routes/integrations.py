@@ -15,6 +15,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from app.api.deps import require
 from app.core.errors import AppError, NotFoundError
 from app.core.permissions import Permission
+from app.core.ratelimit import limiter
 from app.db.session import get_db
 from app.models import MacSearchResult, Switch, User
 from app.security.recorder import AlertItem, get_recorder
@@ -86,8 +87,10 @@ async def netbox_switch(switch_id: int, _: User = Depends(require(Permission.VIE
 
 
 @router.get("/netbox/reconcile")
-async def netbox_reconcile(_: User = Depends(require(Permission.VIEW_INTEGRATIONS)),
+async def netbox_reconcile(user: User = Depends(require(Permission.VIEW_INTEGRATIONS)),
                            db: AsyncSession = Depends(get_db)) -> dict:
+    # One NetBox GET per switch: bounded concurrency (5) and at most 2 runs per minute.
+    limiter.hit(f"netbox-reconcile:{user.id}", limit=2, window_seconds=60)
     try:
         client = get_netbox()
     except IntegrationError as exc:

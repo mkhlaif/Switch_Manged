@@ -199,7 +199,7 @@ async def test_mac_operator_sees_required_message_when_device_does_not_return(
         macop, admin, lab):
     from tests.conftest import approve
 
-    await seed_lab_switches(["SIM-SW-01", "SIM-SW-02"])
+    await seed_lab_switches(["SIM-SW-01", "SIM-SW-02"], roles={"SIM-SW-01": "access"})
     await approve("AOS8", "INTERFACE_ADMIN_STATE", "8.9")
     await admin.put("/api/settings", json={"values": {
         "dry_run_mode": False, "port_bounce_hold_seconds": 1, "post_restart_verify_seconds": 10}})
@@ -228,3 +228,13 @@ async def test_search_still_works_after_hardening(reader, lab):
     await seed_lab_switches(["SIM-SW-01"])
     sid = (await reader.post("/api/mac/search", json={"mac": MAC_ACCESS})).json()["id"]
     assert (await wait_for_search(reader, sid))["found_count"] == 1
+
+
+@pytest.mark.parametrize("raw", ["Pw-Example-1234!\n", "Pw-Example-1234!\r\n",
+                                 "\ufeffPw-Example-1234!\r\n", "Pw-Example-1234!"])
+def test_cli_password_stdin_strips_windows_line_endings_and_bom(raw):
+    import io
+
+    from app.cli import read_stdin_password
+
+    assert read_stdin_password(io.StringIO(raw)) == "Pw-Example-1234!"

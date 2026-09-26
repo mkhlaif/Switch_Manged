@@ -13,6 +13,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.permissions import Permission
+from app.core.ratelimit import limiter
 from app.api.deps import client_ip, require
 from app.core.errors import ConflictError, NotFoundError, ValidationFailedError
 from app.db.session import get_db
@@ -147,6 +148,7 @@ async def run_verification(body: VerificationRun, request: Request,
     output against its documented contract. Never sends a state-changing command."""
     from app.services.alcatel.verification import run_read_verification
 
+    limiter.hit(f"verification-run:{admin.id}", limit=5, window_seconds=60)
     ip = client_ip(request)
     result = await run_read_verification(db, admin, switch_id=body.switch_id, port=body.port,
                                          mac=body.mac, ip=ip)

@@ -21,6 +21,12 @@ from app.db.session import dispose_engine, init_engine, session_factory
 from app.models import Credential, Role, Switch, User
 
 
+def read_stdin_password(stream) -> str:
+    """One line from stdin without the line ending. Windows PowerShell pipes append CRLF (and
+    may prepend a UTF-8 BOM); keeping the CR would silently create an unusable password."""
+    return stream.readline().lstrip("\ufeff").rstrip("\r\n")
+
+
 async def _create_user(username: str, role: str, full_name: str, password: str | None) -> int:
     password = password or getpass.getpass(f"Password for {username}: ")
     problem = validate_password_strength(password)
@@ -101,7 +107,7 @@ def main(argv: list[str] | None = None) -> int:
         print(generate_key())
         return 0
     if args.cmd == "create-user":
-        password = sys.stdin.readline().rstrip("\n") if args.password_stdin else None
+        password = read_stdin_password(sys.stdin) if args.password_stdin else None
         return asyncio.run(_create_user(args.username, args.role, args.full_name, password))
     if args.cmd == "seed-lab":
         return asyncio.run(_seed_lab())

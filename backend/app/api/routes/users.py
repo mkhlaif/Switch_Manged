@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from fastapi import APIRouter, Depends, Request
 from sqlalchemy import delete, func, select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.permissions import Permission
@@ -58,7 +59,11 @@ async def create_user(body: UserCreate, request: Request, admin: User = Depends(
     user = User(username=username, full_name=body.full_name, role=body.role.value,
                 password_hash=hash_password(body.password))
     db.add(user)
-    await db.commit()
+    try:
+        await db.commit()
+    except IntegrityError as exc:  # created concurrently: the UNIQUE constraint decides
+        await db.rollback()
+        raise ConflictError(f"User '{username}' already exists.") from exc
     await record(db, action="USER_CREATE", result="SUCCESS", user=admin, ip=client_ip(request),
                  target_type="user", target_id=user.id, target_label=username,
                  details={"role": user.role})

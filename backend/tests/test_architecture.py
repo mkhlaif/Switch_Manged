@@ -15,6 +15,24 @@ def sources():
         yield path.relative_to(APP).as_posix(), path.read_text(encoding="utf-8")
 
 
+def api_routes(app) -> list:
+    """Every endpoint of the application. FastAPI >= 0.13x keeps included routers as nested
+    objects (with an empty path) in ``app.routes``, so a flat walk would silently check almost
+    nothing; this recurses into them."""
+
+    def walk(routes):
+        for route in routes:
+            nested = getattr(route, "original_router", None)
+            if nested is not None:
+                yield from walk(nested.routes)
+            else:
+                yield route
+
+    routes = [r for r in walk(app.routes) if getattr(r, "path", "").startswith(("/api/", "/health"))]
+    assert len(routes) > 80, f"route enumeration found only {len(routes)} routes"
+    return routes
+
+
 def test_only_transports_send_text_to_the_cli():
     for rel, text in sources():
         if re.search(r"\bcli\.run\(", text):
@@ -63,13 +81,19 @@ def test_no_api_request_model_accepts_command_text():
 
     app = create_app()
     forbidden = {"command", "commands", "cmd", "cli", "exec", "shell", "script", "raw"}
-    for route in app.routes:
-        path = getattr(route, "path", "")
-        body = getattr(getattr(route, "body_field", None), "type_", None)
-        if body is None or path.startswith("/api/profiles"):
-            continue  # profile editor: admin-only, templates validated against the allowlist
-        fields = set(getattr(body, "model_fields", {}))
-        assert not fields & forbidden, f"{path} accepts {fields & forbidden}"
+    checked = 0
+    for route in api_routes(app):
+        path = route.path
+        if path.startswith("/api/profiles") or not hasattr(route, "dependant"):
+            continue  # profile editor (admin-only, templates validated); docs/openapi routes
+        for param in route.dependant.body_params:
+            model = param.field_info.annotation if hasattr(param, "field_info") else None
+            model = model or getattr(param, "type_", None)
+            fields = set(getattr(model, "model_fields", {}))
+            assert fields, f"{path}: body model not recognised"
+            assert not fields & forbidden, f"{path} accepts {fields & forbidden}"
+            checked += 1
+    assert checked >= 20, f"only {checked} request bodies were checked"
 
 
 def test_frontend_has_no_terminal_or_command_console():
@@ -95,10 +119,17 @@ def test_integrations_are_read_only_by_construction():
 
 
 def test_simple_api_has_no_direct_switch_access():
+    from app.schemas.common import SimpleRestartRequest, SimpleSearchRequest
+
     text = (APP / "api/routes/simple.py").read_text(encoding="utf-8")
     for forbidden in ("app.services.ssh", "app.security.firewall", "get_connector",
-                      "AlcatelAdapter", "FirewallSession", "switch_id", "confirmations=body"):
+                      "AlcatelAdapter", "FirewallSession", "body.switch_id", "body.port",
+                      "body.vlan", "confirmations=body"):
         assert forbidden not in text, forbidden
+    # The client can only send a MAC and its own search id — never a switch, port or VLAN
+    # (switch/port/VLAN are read server-side from the user's own search to detect changes).
+    assert set(SimpleSearchRequest.model_fields) == {"mac"}
+    assert set(SimpleRestartRequest.model_fields) == {"search_id"}
     # The only way it reaches a switch is the normal, fully checked restart pipeline.
     assert "prepare_restart(" in text and "execute_restart(" in text
 
@@ -107,7 +138,7 @@ def test_every_api_route_is_authenticated_and_permission_checked():
     public = {("POST", "/api/auth/login"), ("GET", "/api/health"), ("GET", "/health")}
     from app.main import create_app
 
-    for route in create_app().routes:
+    for route in api_routes(create_app()):
         methods = getattr(route, "methods", None) or set()
         path = getattr(route, "path", "")
         if not path.startswith("/api/") or path.startswith("/api/docs") or \

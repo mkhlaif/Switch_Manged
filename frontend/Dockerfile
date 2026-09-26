@@ -8,10 +8,16 @@ COPY . .
 RUN npm run build
 
 # --- serve ---------------------------------------------------------------------------------
-FROM nginx:1.27-alpine
-RUN rm /etc/nginx/conf.d/default.conf && mkdir -p /etc/nginx/snippets /etc/nginx/certs
+# Unprivileged nginx: master and workers run as uid 101 (no root in the running container).
+# With HTTPS, the mounted certs/tls.key must be readable by uid 101 (docs/NETWORK_SETUP.md).
+FROM nginxinc/nginx-unprivileged:1.27-alpine
+USER root
+RUN rm -f /etc/nginx/conf.d/default.conf \
+    && mkdir -p /etc/nginx/snippets /etc/nginx/certs /etc/nginx/available \
+    && chown -R 101:0 /etc/nginx/conf.d && chmod -R g+w /etc/nginx/conf.d
 COPY nginx/security-headers.conf nginx/app-locations.conf /etc/nginx/snippets/
 COPY nginx/http.conf nginx/https.conf /etc/nginx/available/
+USER 101
 # NGINX_SITE selects http.conf (default) or https.conf at container start.
 # PUBLIC_HTTPS_PORT is the published HTTPS port, used in the HTTP -> HTTPS redirect.
 ENV NGINX_SITE=http.conf PUBLIC_HTTPS_PORT=443
