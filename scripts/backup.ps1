@@ -9,17 +9,26 @@
 param([string]$OutDir = ".\backups")
 $ErrorActionPreference = "Stop"
 
+# docker writes progress to stderr; judge native commands by their exit code only (Windows
+# PowerShell 5.1 would otherwise abort when the output is redirected, e.g. in Task Scheduler).
+function Invoke-Docker {
+    $ErrorActionPreference = "Continue"
+    & docker @args 2>&1 | ForEach-Object {
+        if ($_ -is [System.Management.Automation.ErrorRecord]) { $_.Exception.Message } else { $_ }
+    }
+    if ($LASTEXITCODE -ne 0) { throw "docker $($args -join ' ') failed (exit $LASTEXITCODE)" }
+}
+
 New-Item -ItemType Directory -Force -Path $OutDir | Out-Null
 $stamp = (Get-Date).ToUniversalTime().ToString("yyyyMMddTHHmmssZ")
 $file = Join-Path $OutDir "netops-$stamp.dump"
 
 # Write the dump inside the container, then copy it out: PowerShell pipelines are not
 # byte-safe for binary data.
-docker compose exec -T postgres sh -c 'pg_dump -U "$POSTGRES_USER" -d "$POSTGRES_DB" -Fc -f /tmp/netops.dump'
-if ($LASTEXITCODE -ne 0) { throw "pg_dump failed (exit $LASTEXITCODE)" }
-$container = (docker compose ps -q postgres).Trim()
-docker cp "${container}:/tmp/netops.dump" $file
-docker compose exec -T postgres rm -f /tmp/netops.dump | Out-Null
+Invoke-Docker compose exec -T postgres sh -c 'pg_dump -U "$POSTGRES_USER" -d "$POSTGRES_DB" -Fc -f /tmp/netops.dump'
+$container = ((Invoke-Docker compose ps -q postgres) | Select-Object -Last 1).Trim()
+Invoke-Docker cp "${container}:/tmp/netops.dump" $file | Out-Null
+Invoke-Docker compose exec -T postgres rm -f /tmp/netops.dump | Out-Null
 
 $size = (Get-Item $file).Length
 if ($size -lt 1024) { throw "Backup $file is only $size bytes; check 'docker compose ps'." }
