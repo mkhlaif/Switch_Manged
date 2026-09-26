@@ -18,8 +18,8 @@ from tests.conftest import approve, seed_lab_switches, set_mode
 
 GENERIC = "Something went wrong. Please try again or contact IT support."
 CANNOT = "This device cannot be restarted automatically. Please contact IT support."
-TECHNICAL = re.compile(r"1/1/|vlan|ssh|aos|os\d|\d+\.\d+\.|port|"
-                       r"lldp|interfaces|trunk|show|admin-state|cli",
+TECHNICAL = re.compile(r"1/1/|\bvlan\b|\bssh\b|\baos\b|\bos\d|\d+\.\d+\.|\bport\b|"
+                       r"\blldp\b|interfaces|trunk|\bshow\b|admin-state|\bcli\b",
                        re.IGNORECASE)
 
 

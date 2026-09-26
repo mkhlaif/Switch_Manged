@@ -161,29 +161,24 @@ production.
 |---|---|
 | Repository | https://github.com/mkhlaif/Switch_Manged (public; was empty before this work) |
 | Branch | `main` (new default branch; no remote branches existed) |
-| Commits | 19 logical commits (baseline in 5 commits, audit, security, features, tests, performance, CI/scripts, UI, deployment fixes, docs, this report) |
+| Commits | 22 logical commits (baseline in 5 commits, audit, security, features, tests, performance, CI/scripts, UI, deployment fixes, docs, this report, pre-push cleanup, post-push fix) |
 | Commit identity | `mkhlaif <267584620+mkhlaif@users.noreply.github.com>` (repo-local; GitHub noreply address so no personal e-mail is published) |
 | Secrets check | whole history scanned: no `.env`, database, dump, key, certificate or credential committed |
-| Push | see "Push result" below |
+| Push | done — see "Push result" below |
 
 ### Push result
 
-**Not pushed yet — the repository owner's sign-in is required.** On 2026-09-26 a normal push
-(`git push -u origin main`, no force) was attempted after all checks passed; it stopped with
-`could not read Username for 'https://github.com'` because no GitHub credential is stored on the
-build machine (Git Credential Manager has no account; the attempt was run non-interactively so it
-could not open a sign-in window). No credential was created or requested on the owner's behalf.
+**Pushed on 2026-09-26** with a normal `git push -u origin main` (no force, no history rewrite;
+the remote was empty, so it was a plain new-branch push). The repository owner completed the
+GitHub sign-in through Git Credential Manager; no credential was stored in the repository.
 
-To publish, the owner runs in the project directory:
-
-```bash
-git push -u origin main
-```
-
-Git Credential Manager then opens the GitHub sign-in in the browser. The remote was empty, so
-this is a plain fast-forward push — no force, no history rewrite. Afterwards check the
-repository page (README, `docs/`, `.github/workflows/ci.yml`) and the *Actions* tab for the first
-CI run.
+- First push: 21 commits, `main` → `2b453b1`; local `main` == `origin/main` afterwards.
+- First GitHub Actions run (backend tests, frontend tests and build, Docker image build):
+  **success** — https://github.com/mkhlaif/Switch_Manged/actions/runs/36233107230
+- Follow-up commit (normal push): this section updated, a broken Windows command in the README
+  fixed and a test regex repaired (its `\b` word boundaries had been written as control
+  characters, so the "no technical words in MAC_OPERATOR messages" check was weaker than
+  intended; all tests pass with the corrected regex).
 
 ## 10. Known limitations
 

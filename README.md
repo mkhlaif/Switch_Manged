@@ -160,8 +160,8 @@ Invoke-RestMethod http://127.0.0.1:8080/health
   ([docs/DEPLOYMENT.md](docs/DEPLOYMENT.md#5-production-enablement)): in `.env` set
   `READ_ONLY_MODE=false` and `NETWORK_COMMAND_EXECUTION=ENABLED`, `docker compose up -d`, then
   *Safety Controls → Maintenance* and *Settings → Port actions → dry run off*.
-- **Backup / restore / upgrade:** `./scripts/backup.sh` (`.\scriptsackup.ps1`),
-  `./scripts/restore.sh <file>` (`.\scriptsestore.ps1 -File <file>`), and
+- **Backup / restore / upgrade:** `./scripts/backup.sh` (`.\scripts\backup.ps1`),
+  `./scripts/restore.sh <file>` (`.\scripts\restore.ps1 -File <file>`), and
   [docs/UPGRADE.md](docs/UPGRADE.md) (backup → `git pull` → `docker compose up -d --build`).
 
 ## Installation
