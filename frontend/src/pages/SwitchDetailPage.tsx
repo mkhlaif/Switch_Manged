@@ -186,7 +186,22 @@ export default function SwitchDetailPage() {
                 {sw.effective_profile ? <Badge tone="teal">{sw.effective_profile}</Badge> : <Badge tone="violet">none</Badge>}
                 <div className="mt-1 text-xs font-normal text-slate-500">{sw.profile_reason}</div>
               </KV>
+              <KV label="Hostname" mono>{sw.hostname || "—"}</KV>
+              <KV label="Site">{sw.site || "—"}</KV>
               <KV label="Location">{sw.location || "—"}</KV>
+              <KV label="Device locations (MAC operators)">
+                {Object.keys(sw.port_locations || {}).length ? (
+                  <span className="text-sm font-normal">
+                    {Object.entries(sw.port_locations).map(([port, label]) => (
+                      <span key={port} className="block">
+                        <span className="mono">{port}</span> — {label}
+                      </span>
+                    ))}
+                  </span>
+                ) : (
+                  "—"
+                )}
+              </KV>
               <KV label="Credential">{sw.credential_name || <span className="text-red-600">none assigned</span>}</KV>
               <KV label="Enabled">{sw.enabled ? "Yes" : "No"}</KV>
               <KV label="Uplink ports" mono>{sw.uplink_ports.length ? sw.uplink_ports.join(", ") : "—"}</KV>

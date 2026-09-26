@@ -35,6 +35,8 @@ class Permission(str, enum.Enum):
     # --- administration --------------------------------------------------------------------
     VIEW_AUDIT = "view_audit"                # audit log, security events, SSH sessions
     MANAGE_INVENTORY = "manage_inventory"    # switches, host keys, detection
+    IMPORT_SWITCHES = "import_switches"      # bulk switch import (CSV / JSON)
+    EXPORT_SWITCHES = "export_switches"      # switch inventory export (no secrets)
     MANAGE_CREDENTIALS = "manage_credentials"
     MANAGE_USERS = "manage_users"
     MANAGE_PROFILES = "manage_profiles"      # command profiles, lab verification, approvals
@@ -84,10 +86,13 @@ PERMISSION_DESCRIPTIONS: dict[Permission, str] = {
     Permission.RESTART_PORT: "Technical port restart workflow",
     Permission.ACK_ALERTS: "Acknowledge alerts",
     Permission.STOP_OPERATIONS: "Engage the kill switch (safety-increasing only)",
-    Permission.SIMPLE_SEARCH: "Simplified MAC search (switch name only)",
-    Permission.SIMPLE_RESTART: "Simplified restart request (confident ACCESS ports only)",
+    Permission.SIMPLE_SEARCH: "Simplified MAC search (device location only)",
+    Permission.SIMPLE_RESTART: "Direct restart of a verified endpoint port (automatic safety "
+                               "checks, no administrator approval)",
     Permission.VIEW_AUDIT: "Audit log, security events, SSH session records",
     Permission.MANAGE_INVENTORY: "Switches, host keys, model/version detection",
+    Permission.IMPORT_SWITCHES: "Bulk switch import (CSV / JSON, validated preview)",
+    Permission.EXPORT_SWITCHES: "Switch inventory export (CSV / JSON, never secrets)",
     Permission.MANAGE_CREDENTIALS: "SSH credentials",
     Permission.MANAGE_USERS: "Users, roles view, force logout",
     Permission.MANAGE_PROFILES: "Command profiles and lab verification",

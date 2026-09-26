@@ -1,7 +1,8 @@
 from __future__ import annotations
 
 from fastapi import APIRouter, Depends, Query, Request
-from sqlalchemy import select
+from sqlalchemy import func, select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.permissions import Permission
@@ -47,6 +48,33 @@ def _check_transport(transport: str | None) -> None:
                                     "(ENABLE_SIMULATOR=true).")
 
 
+async def _check_unique(db: AsyncSession, *, name: str, host: str, ssh_port: int,
+                        hostname: str, exclude_id: int | None = None) -> None:
+    """Friendly duplicate errors; the database constraints are the final guarantee."""
+    others = select(Switch).where(Switch.id != exclude_id) if exclude_id else select(Switch)
+    if (await db.execute(others.where(func.lower(Switch.name) == name.lower()))).scalars().first():
+        raise ConflictError(f"A switch named '{name}' already exists.")
+    same_address = (await db.execute(others.where(
+        func.lower(Switch.host) == host.lower(), Switch.ssh_port == ssh_port))).scalars().first()
+    if same_address:
+        raise ConflictError(f"The management address {host}:{ssh_port} is already used by "
+                            f"switch '{same_address.name}'.")
+    if hostname:
+        owner = (await db.execute(others.where(Switch.hostname == hostname))).scalars().first()
+        if owner:
+            raise ConflictError(f"The hostname '{hostname}' is already used by switch "
+                                f"'{owner.name}'.")
+
+
+async def _commit(db: AsyncSession) -> None:
+    try:
+        await db.commit()
+    except IntegrityError as exc:
+        await db.rollback()
+        raise ConflictError("The switch conflicts with another inventory entry (name, "
+                            "management address or hostname).") from exc
+
+
 @router.get("", response_model=list[SwitchOut])
 async def list_switches(_: User = Depends(require(Permission.VIEW_INVENTORY)), db: AsyncSession = Depends(get_db)):
     profiles = await load_profiles(db)
@@ -64,13 +92,13 @@ async def get_switch(switch_id: int, _: User = Depends(require(Permission.VIEW_I
 async def create_switch(body: SwitchCreate, request: Request, admin: User = Depends(require(Permission.MANAGE_INVENTORY)),
                         db: AsyncSession = Depends(get_db)):
     _check_transport(body.transport)
-    if (await db.execute(select(Switch).where(Switch.name == body.name))).scalar_one_or_none():
-        raise ConflictError(f"A switch named '{body.name}' already exists.")
+    await _check_unique(db, name=body.name, host=body.host, ssh_port=body.ssh_port,
+                        hostname=body.hostname)
     if body.credential_id and await db.get(Credential, body.credential_id) is None:
         raise ValidationFailedError("Credential not found.")
     sw = Switch(**body.model_dump())
     db.add(sw)
-    await db.commit()
+    await _commit(db)
     await record(db, action="SWITCH_CREATE", result="SUCCESS", user=admin, ip=client_ip(request),
                  target_type="switch", target_id=sw.id, target_label=sw.name,
                  switch_name=sw.name, details=body.model_dump())
@@ -86,6 +114,9 @@ async def update_switch(switch_id: int, body: SwitchUpdate, request: Request,
     if "credential_id" in changes and changes["credential_id"] and \
             await db.get(Credential, changes["credential_id"]) is None:
         raise ValidationFailedError("Credential not found.")
+    await _check_unique(db, name=changes.get("name", sw.name), host=changes.get("host", sw.host),
+                        ssh_port=changes.get("ssh_port", sw.ssh_port),
+                        hostname=changes.get("hostname", sw.hostname), exclude_id=sw.id)
     if ("host" in changes and changes["host"] != sw.host) or (
             "ssh_port" in changes and changes["ssh_port"] != sw.ssh_port):
         # A different endpoint means a different host key; require re-enrollment.
@@ -94,7 +125,7 @@ async def update_switch(switch_id: int, body: SwitchUpdate, request: Request,
     for key, value in changes.items():
         if hasattr(sw, key) and key != "host_key_cleared":
             setattr(sw, key, value)
-    await db.commit()
+    await _commit(db)
     await record(db, action="SWITCH_UPDATE", result="SUCCESS", user=admin, ip=client_ip(request),
                  target_type="switch", target_id=sw.id, target_label=sw.name,
                  switch_name=sw.name, details=changes)
@@ -128,6 +159,7 @@ async def test_switch(switch_id: int, request: Request, user: User = Depends(req
 @router.post("/{switch_id}/detect")
 async def detect_switch(switch_id: int, request: Request, admin: User = Depends(require(Permission.MANAGE_INVENTORY)),
                         db: AsyncSession = Depends(get_db)) -> dict:
+    limiter.hit(f"switch-detect:{admin.id}", limit=20, window_seconds=60)
     sw = await _get(db, switch_id)
     ctx = ExecutionContext.for_user(admin, "SWITCH_DETECT", client_ip(request), reference=sw.name)
     result = await inventory.detect(db, sw, ctx)
@@ -138,8 +170,9 @@ async def detect_switch(switch_id: int, request: Request, admin: User = Depends(
 
 
 @router.post("/{switch_id}/host-key/fetch")
-async def fetch_host_key(switch_id: int, _: User = Depends(require(Permission.MANAGE_INVENTORY)),
+async def fetch_host_key(switch_id: int, admin: User = Depends(require(Permission.MANAGE_INVENTORY)),
                          db: AsyncSession = Depends(get_db)) -> dict:
+    limiter.hit(f"hostkey-fetch:{admin.id}", limit=20, window_seconds=60)
     sw = await _get(db, switch_id)
     data = await inventory.fetch_host_key(sw)
     data["currently_trusted"] = sw.host_key_fingerprint or None

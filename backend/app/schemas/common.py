@@ -6,6 +6,7 @@ from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
+from app.core import inventory_fields as fields
 from app.models import Role
 
 
@@ -99,12 +100,26 @@ def _clean_ports(value: list[str]) -> list[str]:
 _SWITCH_ROLE = r"^(access|distribution|core|unknown)$"
 
 
+def _safe_text(value: str | None, field: str) -> str | None:
+    """Location/description: no control characters, no leading spreadsheet-formula character."""
+    if value is None:
+        return None
+    if fields.CONTROL_CHARS.search(value):
+        raise ValueError(f"{field} contains control characters.")
+    value = value.strip()
+    if value.startswith(fields.FORMULA_PREFIXES):
+        raise ValueError(f"{field} must not start with {value[0]!r}.")
+    return value
+
+
 class SwitchBase(Strict):
     name: str = Field(min_length=1, max_length=128)
     host: str = Field(pattern=_HOST_PATTERN)
+    hostname: str = Field(default="", max_length=253)
     ssh_port: int = Field(default=22, ge=1, le=65535)
     model: str = Field(default="", max_length=64)
     aos_version: str = Field(default="", max_length=64)
+    site: str = Field(default="", max_length=128)
     location: str = Field(default="", max_length=128)
     description: str = Field(default="", max_length=255)
     enabled: bool = True
@@ -113,12 +128,33 @@ class SwitchBase(Strict):
     transport: str = Field(default="ssh", pattern=r"^(ssh|simulator)$")
     legacy_ssh_algorithms: bool = False
     uplink_ports: list[str] = Field(default_factory=list)
+    port_locations: dict[str, str] = Field(default_factory=dict)
     role: str = Field(default="unknown", pattern=_SWITCH_ROLE)
 
     @field_validator("uplink_ports")
     @classmethod
     def _ports(cls, value: list[str]) -> list[str]:
         return _clean_ports(value)
+
+    @field_validator("hostname")
+    @classmethod
+    def _hostname(cls, value: str) -> str:
+        return fields.hostname(value)
+
+    @field_validator("site")
+    @classmethod
+    def _site(cls, value: str) -> str:
+        return fields.free_text(value, "site", 128)
+
+    @field_validator("location", "description")
+    @classmethod
+    def _text(cls, value: str, info) -> str:
+        return _safe_text(value, info.field_name) or ""
+
+    @field_validator("port_locations")
+    @classmethod
+    def _port_locations(cls, value: dict[str, str]) -> dict[str, str]:
+        return fields.port_locations(value)
 
 
 class SwitchCreate(SwitchBase):
@@ -128,9 +164,11 @@ class SwitchCreate(SwitchBase):
 class SwitchUpdate(Strict):
     name: str | None = Field(default=None, min_length=1, max_length=128)
     host: str | None = Field(default=None, pattern=_HOST_PATTERN)
+    hostname: str | None = Field(default=None, max_length=253)
     ssh_port: int | None = Field(default=None, ge=1, le=65535)
     model: str | None = Field(default=None, max_length=64)
     aos_version: str | None = Field(default=None, max_length=64)
+    site: str | None = Field(default=None, max_length=128)
     location: str | None = Field(default=None, max_length=128)
     description: str | None = Field(default=None, max_length=255)
     enabled: bool | None = None
@@ -139,6 +177,7 @@ class SwitchUpdate(Strict):
     transport: str | None = Field(default=None, pattern=r"^(ssh|simulator)$")
     legacy_ssh_algorithms: bool | None = None
     uplink_ports: list[str] | None = None
+    port_locations: dict[str, str] | None = None
     role: str | None = Field(default=None, pattern=_SWITCH_ROLE)
 
     @field_validator("uplink_ports")
@@ -146,14 +185,36 @@ class SwitchUpdate(Strict):
     def _ports(cls, value: list[str] | None) -> list[str] | None:
         return None if value is None else _clean_ports(value)
 
+    @field_validator("hostname")
+    @classmethod
+    def _hostname(cls, value: str | None) -> str | None:
+        return None if value is None else fields.hostname(value)
+
+    @field_validator("site")
+    @classmethod
+    def _site(cls, value: str | None) -> str | None:
+        return None if value is None else fields.free_text(value, "site", 128)
+
+    @field_validator("location", "description")
+    @classmethod
+    def _text(cls, value: str | None, info) -> str | None:
+        return _safe_text(value, info.field_name)
+
+    @field_validator("port_locations")
+    @classmethod
+    def _port_locations(cls, value: dict[str, str] | None) -> dict[str, str] | None:
+        return None if value is None else fields.port_locations(value)
+
 
 class SwitchOut(ORM):
     id: int
     name: str
     host: str
+    hostname: str = ""
     ssh_port: int
     model: str
     aos_version: str
+    site: str = ""
     location: str
     description: str
     enabled: bool
@@ -165,6 +226,7 @@ class SwitchOut(ORM):
     transport: str
     legacy_ssh_algorithms: bool
     uplink_ports: list[str]
+    port_locations: dict[str, str] = {}
     role: str = "unknown"
     host_key_fingerprint: str
     host_key_trusted: bool = False
@@ -174,6 +236,20 @@ class SwitchOut(ORM):
     last_error: str
     created_at: datetime
     updated_at: datetime
+
+
+class ImportUpload(Strict):
+    """The file is sent as text inside JSON (no multipart parsing); the size is bounded here and
+    again by the importer (5 MB, 5000 rows)."""
+
+    filename: str = Field(default="", max_length=255)
+    format: str = Field(pattern=r"^(csv|json)$")
+    content: str = Field(min_length=1, max_length=5_000_000)
+
+
+class ImportConfirm(Strict):
+    on_existing: str = Field(default="skip", pattern=r"^(skip|update)$")
+    skip_invalid: bool = False
 
 
 class TrustHostKeyRequest(Strict):

@@ -4,7 +4,7 @@ import enum
 import uuid
 from datetime import datetime
 
-from sqlalchemy import JSON, Boolean, Float, ForeignKey, Integer, String, Text
+from sqlalchemy import JSON, Boolean, Float, ForeignKey, Index, Integer, String, Text
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.core.timeutil import utcnow
@@ -82,13 +82,17 @@ class MacSearchResult(Base):
     get a single row with a non-``found`` status so the full outcome of a search is kept."""
 
     __tablename__ = "mac_search_results"
+    # One row per switch per search: the largest table. (status, created_at) serves the topology
+    # view (latest "found" rows) and the dashboard (today's failures); switch_id serves the
+    # ON DELETE SET NULL of a deleted switch. Measured need: docs/DATABASE.md.
+    __table_args__ = (Index("ix_mac_search_results_status_created", "status", "created_at"),)
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     search_id: Mapped[str] = mapped_column(
         ForeignKey("mac_searches.id", ondelete="CASCADE"), index=True
     )
     switch_id: Mapped[int | None] = mapped_column(
-        ForeignKey("switches.id", ondelete="SET NULL"), nullable=True
+        ForeignKey("switches.id", ondelete="SET NULL"), nullable=True, index=True
     )
     switch_name: Mapped[str] = mapped_column(String(128))
     switch_host: Mapped[str] = mapped_column(String(255), default="")

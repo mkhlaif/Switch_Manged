@@ -1,10 +1,11 @@
-import { Plus, Search, Server } from "lucide-react";
+import { Download, Plus, Search, Server, Upload } from "lucide-react";
 import { useMemo, useState } from "react";
 import { useNavigate } from "react-router-dom";
 import { api } from "../api/client";
 import type { Switch } from "../api/types";
 import { useAuth } from "../auth/AuthContext";
 import { useSafetyFlags } from "../components/Layout";
+import { ImportDialog } from "../components/ImportDialog";
 import { SwitchForm } from "../components/SwitchForm";
 import { Badge, Button, Card, EmptyState, ErrorBanner, Input, Loading, PageHeader, Select, SwitchStatusBadge, Table, Td, Th } from "../components/ui";
 import { fmtRelative } from "../lib/format";
@@ -18,13 +19,16 @@ export default function SwitchesPage() {
   const [q, setQ] = useState("");
   const [status, setStatus] = useState("");
   const [adding, setAdding] = useState(false);
+  const [importing, setImporting] = useState(false);
+  const exportClass =
+    "inline-flex h-9 items-center justify-center gap-2 rounded-lg border border-slate-300 bg-white px-3.5 text-sm font-medium text-slate-800 hover:bg-slate-50 dark:border-slate-700 dark:bg-slate-900 dark:text-slate-100 dark:hover:bg-slate-800";
 
   const rows = useMemo(() => {
     const needle = q.trim().toLowerCase();
     return (data || []).filter(
       (s) =>
         (!status || s.status === status) &&
-        (!needle || [s.name, s.host, s.model, s.aos_version, s.location].some((v) => v.toLowerCase().includes(needle))),
+        (!needle || [s.name, s.host, s.hostname, s.model, s.aos_version, s.site, s.location].some((v) => (v || "").toLowerCase().includes(needle))),
     );
   }, [data, q, status]);
 
@@ -35,9 +39,20 @@ export default function SwitchesPage() {
         subtitle="Alcatel-Lucent Enterprise OmniSwitch inventory"
         actions={
           hasRole("admin") && (
-            <Button variant="primary" icon={<Plus className="h-4 w-4" />} onClick={() => setAdding(true)}>
-              Add switch
-            </Button>
+            <div className="flex flex-wrap gap-2">
+              <Button variant="primary" icon={<Plus className="h-4 w-4" />} onClick={() => setAdding(true)}>
+                Add switch
+              </Button>
+              <Button icon={<Upload className="h-4 w-4" />} onClick={() => setImporting(true)}>
+                Import
+              </Button>
+              <a className={exportClass} href="/api/switches/export?format=csv" download>
+                <Download className="h-4 w-4" /> Export CSV
+              </a>
+              <a className={exportClass} href="/api/switches/export?format=json" download>
+                <Download className="h-4 w-4" /> Export JSON
+              </a>
+            </div>
           )
         }
       />
@@ -45,7 +60,7 @@ export default function SwitchesPage() {
         <div className="flex flex-wrap gap-3 border-b border-slate-200 p-3 dark:border-slate-800">
           <div className="relative min-w-60 flex-1">
             <Search className="pointer-events-none absolute top-2.5 left-3 h-4 w-4 text-slate-400" />
-            <Input className="pl-9" placeholder="Filter by name, IP, model, AOS, location…" value={q} onChange={(e) => setQ(e.target.value)} />
+            <Input className="pl-9" placeholder="Filter by name, IP, model, AOS, site, location…" aria-label="Filter switches" value={q} onChange={(e) => setQ(e.target.value)} />
           </div>
           <Select className="w-44" aria-label="Filter by status" value={status} onChange={(e) => setStatus(e.target.value)}>
             <option value="">All statuses</option>
@@ -75,7 +90,8 @@ export default function SwitchesPage() {
                 <Th>Model</Th>
                 <Th>AOS</Th>
                 <Th>Profile</Th>
-                <Th>Location</Th>
+                <Th>Role</Th>
+                <Th>Site / location</Th>
                 <Th>Host key</Th>
                 <Th>Last check</Th>
               </tr>
@@ -92,7 +108,8 @@ export default function SwitchesPage() {
                   <Td>{s.model || <span className="text-slate-400">unknown</span>}</Td>
                   <Td mono>{s.aos_version || <span className="font-sans text-slate-400">unknown</span>}</Td>
                   <Td>{s.effective_profile ? <Badge tone="teal">{s.effective_profile}</Badge> : <Badge tone="violet" className="max-w-40 truncate">none</Badge>}</Td>
-                  <Td>{s.location}</Td>
+                  <Td className="capitalize">{s.role}</Td>
+                  <Td>{[s.site, s.location].filter(Boolean).join(" — ")}</Td>
                   <Td>{s.transport === "simulator" ? <Badge tone="violet">sim</Badge> : s.host_key_trusted ? <Badge tone="green">trusted</Badge> : <Badge tone="orange">not enrolled</Badge>}</Td>
                   <Td className="whitespace-nowrap text-slate-500">{fmtRelative(s.last_check_at)}</Td>
                 </tr>
@@ -101,6 +118,7 @@ export default function SwitchesPage() {
           </Table>
         )}
       </Card>
+      {importing && <ImportDialog onClose={() => setImporting(false)} onImported={() => reload()} />}
       {adding && (
         <SwitchForm
           labMode={!!flags?.lab}

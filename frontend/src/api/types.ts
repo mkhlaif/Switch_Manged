@@ -20,9 +20,11 @@ export interface Switch {
   id: number;
   name: string;
   host: string;
+  hostname: string;
   ssh_port: number;
   model: string;
   aos_version: string;
+  site: string;
   location: string;
   description: string;
   enabled: boolean;
@@ -34,6 +36,7 @@ export interface Switch {
   transport: "ssh" | "simulator";
   legacy_ssh_algorithms: boolean;
   uplink_ports: string[];
+  port_locations: Record<string, string>;
   role: SwitchRole;
   host_key_fingerprint: string;
   host_key_trusted: boolean;
@@ -593,8 +596,57 @@ export interface SimpleResult {
     | "success_pending"
     | "failed";
   message: string;
-  switch_name?: string;
+  location?: string;
   can_restart?: boolean;
   search_id?: string;
   request_id?: string;
+}
+
+export type ImportStatus = "validated" | "queued" | "running" | "completed" | "failed" | "cancelled" | "expired" | "interrupted";
+
+export interface ImportRow {
+  line: number;
+  name: string;
+  management_ip: string;
+  status: "valid" | "invalid" | "duplicate";
+  action: "" | "create" | "update" | "unchanged" | "skip";
+  errors: string[];
+  warnings: string[];
+  diff: string[];
+  result: "" | "imported" | "updated" | "unchanged" | "skipped" | "failed" | "not_processed";
+  message: string;
+}
+
+export interface ImportJob {
+  id: string;
+  status: ImportStatus;
+  file_format: "csv" | "json";
+  filename: string;
+  created_by: string;
+  on_existing: "skip" | "update";
+  skip_invalid: boolean;
+  cancel_requested: boolean;
+  total: number;
+  valid: number;
+  invalid: number;
+  duplicates: number;
+  warnings: number;
+  processed: number;
+  imported: number;
+  updated: number;
+  unchanged: number;
+  skipped: number;
+  failed: number;
+  new: number;
+  existing_changed: number;
+  existing_unchanged: number;
+  file_errors: string[];
+  error: string;
+  created_at: string | null;
+  expires_at: string | null;
+  confirmed_at: string | null;
+  started_at: string | null;
+  completed_at: string | null;
+  failed_at: string | null;
+  rows?: ImportRow[];
 }

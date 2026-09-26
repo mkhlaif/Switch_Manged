@@ -3,7 +3,17 @@ from __future__ import annotations
 import enum
 from datetime import datetime
 
-from sqlalchemy import JSON, Boolean, ForeignKey, Integer, String, Text
+from sqlalchemy import (
+    JSON,
+    Boolean,
+    CheckConstraint,
+    ForeignKey,
+    Index,
+    Integer,
+    String,
+    Text,
+    text,
+)
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from app.core.timeutil import utcnow
@@ -40,17 +50,41 @@ class Transport(str, enum.Enum):
     SIMULATOR = "simulator"
 
 
+SWITCH_ROLES = ("access", "distribution", "core", "unknown")
+
+
 class Switch(Base):
     __tablename__ = "switches"
+    __table_args__ = (
+        # One inventory entry per management address (host names are case-insensitive): a second
+        # entry for the same switch would make every MAC on it appear in two "locations".
+        # Expression indexes: they also serve the case-insensitive lookups of the importer and
+        # the switch API (without them every check was a full table scan).
+        Index("uq_switches_host_port", text("lower(host)"), "ssh_port", unique=True),
+        Index("uq_switches_name_lower", text("lower(name)"), unique=True),
+        Index("uq_switches_hostname", "hostname", unique=True,
+              postgresql_where=text("hostname <> ''"), sqlite_where=text("hostname <> ''")),
+        CheckConstraint("ssh_port BETWEEN 1 AND 65535", name="ssh_port_range"),
+        CheckConstraint("role IN ('access', 'distribution', 'core', 'unknown')",
+                        name="role_valid"),
+        CheckConstraint("transport IN ('ssh', 'simulator')", name="transport_valid"),
+    )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     name: Mapped[str] = mapped_column(String(128), unique=True, index=True)
     host: Mapped[str] = mapped_column(String(255))
+    # DNS host name of the switch (optional, informational; unique when set).
+    hostname: Mapped[str] = mapped_column(String(255), default="", server_default="")
     ssh_port: Mapped[int] = mapped_column(Integer, default=22)
     model: Mapped[str] = mapped_column(String(64), default="")
     aos_version: Mapped[str] = mapped_column(String(64), default="")
+    site: Mapped[str] = mapped_column(String(128), default="", server_default="")
     location: Mapped[str] = mapped_column(String(128), default="")
     description: Mapped[str] = mapped_column(String(255), default="")
+    # Human-readable location per port ({"1/1/5": "Building A - Floor 2 - Office 204"}). This is
+    # the only location text the MAC_OPERATOR sees; without it, site and location are shown.
+    port_locations: Mapped[dict] = mapped_column(JSON, default=dict,
+                                                 server_default=text("'{}'"))
     enabled: Mapped[bool] = mapped_column(Boolean, default=True)
     credential_id: Mapped[int | None] = mapped_column(
         ForeignKey("credentials.id", ondelete="RESTRICT"), nullable=True

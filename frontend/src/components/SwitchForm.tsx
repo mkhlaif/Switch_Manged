@@ -6,10 +6,13 @@ import { Button, ErrorBanner, Field, Input, Modal, Select, Textarea, Toggle } fr
 interface FormState {
   name: string;
   host: string;
+  hostname: string;
   ssh_port: number;
   model: string;
   aos_version: string;
+  site: string;
   location: string;
+  port_locations: string;
   description: string;
   enabled: boolean;
   credential_id: number | null;
@@ -24,10 +27,15 @@ function toForm(s?: Switch): FormState {
   return {
     name: s?.name || "",
     host: s?.host || "",
+    hostname: s?.hostname || "",
     ssh_port: s?.ssh_port || 22,
     model: s?.model || "",
     aos_version: s?.aos_version || "",
+    site: s?.site || "",
     location: s?.location || "",
+    port_locations: Object.entries(s?.port_locations || {})
+      .map(([port, label]) => `${port} = ${label}`)
+      .join("\n"),
     description: s?.description || "",
     enabled: s?.enabled ?? true,
     credential_id: s?.credential_id ?? null,
@@ -57,8 +65,20 @@ export function SwitchForm({ existing, labMode, onClose, onSaved }: { existing?:
     e.preventDefault();
     setBusy(true);
     setError(null);
+    const portLocations: Record<string, string> = {};
+    for (const line of form.port_locations.split("\n")) {
+      if (!line.trim()) continue;
+      const at = line.indexOf("=");
+      if (at < 1) {
+        setError(new Error(`Port location "${line.trim()}" must look like "1/1/5 = Building A - Office 204".`));
+        setBusy(false);
+        return;
+      }
+      portLocations[line.slice(0, at).trim()] = line.slice(at + 1).trim();
+    }
     const body = {
       ...form,
+      port_locations: portLocations,
       uplink_ports: form.uplink_ports
         .split(/[\s,]+/)
         .map((p) => p.trim())
@@ -96,6 +116,9 @@ export function SwitchForm({ existing, labMode, onClose, onSaved }: { existing?:
         <Field label="Management IP / hostname">
           <Input value={form.host} onChange={(e) => set("host", e.target.value)} placeholder="192.0.2.10" className="mono" required />
         </Field>
+        <Field label="Hostname" hint="DNS name of the switch (optional, unique).">
+          <Input value={form.hostname} onChange={(e) => set("hostname", e.target.value)} placeholder="sw01.example.net" className="mono" />
+        </Field>
         <Field label="SSH port">
           <Input type="number" min={1} max={65535} value={form.ssh_port} onChange={(e) => set("ssh_port", Number(e.target.value))} />
         </Field>
@@ -114,6 +137,9 @@ export function SwitchForm({ existing, labMode, onClose, onSaved }: { existing?:
         </Field>
         <Field label="AOS version" hint="e.g. 6.7.2.191.R08 or 8.10.94.R03. Empty = detect.">
           <Input value={form.aos_version} onChange={(e) => set("aos_version", e.target.value)} className="mono" />
+        </Field>
+        <Field label="Site">
+          <Input value={form.site} onChange={(e) => set("site", e.target.value)} placeholder="Main campus" />
         </Field>
         <Field label="Location">
           <Input value={form.location} onChange={(e) => set("location", e.target.value)} placeholder="Building A / Floor 2" />
@@ -140,6 +166,14 @@ export function SwitchForm({ existing, labMode, onClose, onSaved }: { existing?:
         <div className="sm:col-span-2">
           <Field label="Uplink / trunk ports" hint="Comma-separated (e.g. 1/1/49, 1/1/50 or 1/25). These are always classified TRUNK and can never be restarted.">
             <Input value={form.uplink_ports} onChange={(e) => set("uplink_ports", e.target.value)} className="mono" />
+          </Field>
+        </div>
+        <div className="sm:col-span-2">
+          <Field
+            label="Device locations per port"
+            hint='One per line: "1/1/5 = Building A - Floor 2 - Office 204". This is the only location MAC operators see; without it they see site and location.'
+          >
+            <Textarea rows={3} value={form.port_locations} onChange={(e) => set("port_locations", e.target.value)} className="mono" />
           </Field>
         </div>
         <div className="sm:col-span-2">

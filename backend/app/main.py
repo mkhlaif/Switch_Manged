@@ -27,6 +27,7 @@ from app.api.routes import (
     safety,
     settings,
     simple,
+    switch_transfer,
     switches,
     topology,
     users,
@@ -41,8 +42,9 @@ from app.models import Role, User
 from app.security.circuit_breaker import init_breaker
 from app.security.firewall import get_firewall, init_firewall
 from app.security.recorder import get_recorder
-from app.security.request_guard import CommandFieldGuard
+from app.security.request_guard import BodySizeLimit, CommandFieldGuard
 from app.services.alcatel.registry import sync_builtin_profiles
+from app.services.inventory.bulk import mark_interrupted_imports
 from app.services.mac_search.service import mark_interrupted_searches
 from app.services.port_control.service import mark_interrupted_actions
 from app.services.ssh.manager import init_connector
@@ -93,9 +95,10 @@ async def lifespan(app: FastAPI):
         await sync_builtin_profiles(db)
         n_searches = await mark_interrupted_searches(db)
         n_actions = await mark_interrupted_actions(db)
-        if n_searches or n_actions:
-            log.warning("Marked %d search(es) and %d port action(s) as interrupted", n_searches,
-                        n_actions)
+        n_imports = await mark_interrupted_imports(db)
+        if n_searches or n_actions or n_imports:
+            log.warning("Marked %d search(es), %d port action(s) and %d import(s) as "
+                        "interrupted", n_searches, n_actions, n_imports)
     await _bootstrap_admin()
     if s.ssh_allow_unknown_host_keys:
         log_security(log, "SSH_ALLOW_UNKNOWN_HOST_KEYS is ON: host-key verification is disabled "
@@ -125,6 +128,8 @@ def create_app() -> FastAPI:
 
     # Rejects any request body that carries a command-like field (see security/request_guard).
     app.add_middleware(CommandFieldGuard)
+    # Outermost of the two: oversized bodies are refused before anything reads them.
+    app.add_middleware(BodySizeLimit)
 
     if s.cors_origin_list:
         app.add_middleware(CORSMiddleware, allow_origins=s.cors_origin_list,
@@ -191,9 +196,10 @@ def create_app() -> FastAPI:
                 "policy_digest": firewall.digest[:16],
                 "running_tasks": len(tasks.running())}
 
-    for module in (auth, users, credentials, switches, mac, history, ports, audit, settings,
-                   profiles, dashboard, operations, safety, alerts, integrations, simple,
-                   topology):
+    # switch_transfer before switches: /api/switches/import must not match /{switch_id}.
+    for module in (auth, users, credentials, switch_transfer, switches, mac, history, ports,
+                   audit, settings, profiles, dashboard, operations, safety, alerts,
+                   integrations, simple, topology):
         app.include_router(module.router)
     return app
 

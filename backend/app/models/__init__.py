@@ -1,6 +1,8 @@
 from app.models.actions import PortAction, PortActionStatus
 from app.models.audit import AuditLog, SystemSetting
+from app.models.imports import ACTIVE_IMPORT_STATUSES, ImportJob, ImportStatus
 from app.models.inventory import (
+    SWITCH_ROLES,
     CommandProfileRecord,
     Credential,
     Switch,
@@ -26,6 +28,10 @@ from app.models.security import (
 from app.models.user import Role, User, UserSession
 
 __all__ = [
+    "ACTIVE_IMPORT_STATUSES",
+    "ImportJob",
+    "ImportStatus",
+    "SWITCH_ROLES",
     "Alert",
     "CommandVerification",
     "OperationLock",

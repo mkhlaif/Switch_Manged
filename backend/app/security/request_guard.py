@@ -82,6 +82,60 @@ async def _record(scope, key: str) -> None:
                  scope.get("path"), key[:40], ip)
 
 
+MAX_BODY_BYTES = 1_000_000
+# Paths that accept larger bodies (switch import: 5 MB file, JSON-escaped).
+LARGE_BODY_PATHS = {"/api/switches/import/validate": 12_000_000}
+
+
+class BodySizeLimit:
+    """Rejects oversized request bodies (413) before any route or dependency reads them —
+    FastAPI would otherwise buffer the whole body in memory, even for unauthenticated clients.
+    nginx enforces the same limits in front of the application."""
+
+    def __init__(self, app) -> None:
+        self.app = app
+
+    async def __call__(self, scope, receive, send):
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+        limit = LARGE_BODY_PATHS.get(scope.get("path", ""), MAX_BODY_BYTES)
+        headers = dict(scope.get("headers") or [])
+        try:
+            declared = int(headers.get(b"content-length", b"0") or 0)
+        except ValueError:
+            declared = 0
+        if declared > limit:
+            await _too_large(scope, receive, send, limit)
+            return
+        received = 0
+
+        async def limited_receive():
+            nonlocal received
+            message = await receive()
+            if message["type"] == "http.request":
+                received += len(message.get("body", b""))
+                if received > limit:
+                    raise _BodyTooLarge()
+            return message
+
+        try:
+            await self.app(scope, limited_receive, send)
+        except _BodyTooLarge:
+            await _too_large(scope, receive, send, limit)
+
+
+class _BodyTooLarge(Exception):
+    pass
+
+
+async def _too_large(scope, receive, send, limit: int) -> None:
+    response = JSONResponse(status_code=413, content={"error": {
+        "code": "REQUEST_TOO_LARGE", "title": "Request too large",
+        "message": f"The request body is larger than {limit // 1_000_000} MB."}})
+    await response(scope, receive, send)
+
+
 class CommandFieldGuard:
     def __init__(self, app) -> None:
         self.app = app
