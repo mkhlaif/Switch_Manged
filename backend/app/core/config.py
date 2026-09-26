@@ -16,6 +16,13 @@ class Settings(BaseSettings):
 
     # --- Database -------------------------------------------------------------------------------
     database_url: str = "sqlite+aiosqlite:///./data/dev.db"
+    # PostgreSQL connection pool and timeouts (bounded: no request waits or runs forever).
+    db_pool_size: int = Field(default=10, ge=1, le=100)
+    db_max_overflow: int = Field(default=10, ge=0, le=100)
+    db_pool_timeout: float = Field(default=30.0, ge=1, le=300)      # wait for a free connection
+    db_connect_timeout: float = Field(default=10.0, ge=1, le=120)
+    db_statement_timeout: int = Field(default=60, ge=5, le=3600)     # seconds per statement
+    db_idle_in_transaction_ms: int = Field(default=60000, ge=1000, le=3600000)
 
     # --- Secrets --------------------------------------------------------------------------------
     # Fernet key (urlsafe base64, 32 bytes) used to encrypt switch credentials at rest.

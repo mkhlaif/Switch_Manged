@@ -38,10 +38,20 @@ def _run(connection: Connection) -> None:
         context.run_migrations()
 
 
+def _check_sqlite_integrity(connection: Connection) -> None:
+    violations = connection.exec_driver_sql("PRAGMA foreign_key_check").fetchall()
+    if violations:
+        raise RuntimeError(f"Foreign key violations after migration: {violations[:20]}")
+
+
 async def run_migrations_online() -> None:
-    engine = _make_engine(_url())
+    url = _url()
+    # SQLite: enforcement off while tables are rebuilt (see _make_engine), verified afterwards.
+    engine = _make_engine(url, sqlite_foreign_keys=not url.startswith("sqlite"))
     async with engine.connect() as connection:
         await connection.run_sync(_run)
+        if url.startswith("sqlite"):
+            await connection.run_sync(_check_sqlite_integrity)
     await engine.dispose()
 
 
