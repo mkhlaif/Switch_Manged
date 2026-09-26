@@ -1,21 +1,36 @@
 """Bulk switch import (CSV / JSON) and export.
 
+A row describes HOW to reach a switch (name, management IP, credential reference, optionally
+the SSH host-key fingerprint obtained out of band). WHAT the switch is (vendor, model, AOS
+version) is never taken from the file: it is discovered automatically after the import. A
+``model`` / ``aos_version`` (or ``expected_model`` / ``expected_aos_version``) column is optional
+EXPECTED METADATA that discovery compares with the device (a difference = MISMATCH, which
+blocks state-changing operations).
+
 Import workflow — nothing is written to the inventory before the administrator confirms:
 
 1. ``validate_upload``: parse the file, validate every row, compare it with the inventory and
    store an :class:`ImportJob` with the preview (status ``validated``, expires after 30 min).
 2. ``confirm_import``: the administrator chooses what happens to switches that already exist
-   (``skip`` — default — or ``update``) and must explicitly accept that invalid rows are skipped.
-   Only one import runs at a time.
-3. ``run_import`` (background task): every row is re-checked against the inventory and applied
-   in its own short transaction, so one failing row (e.g. a name created concurrently, rejected
-   by a UNIQUE constraint) is rolled back and reported as *failed* without affecting any other
-   row. Progress is saved, and cancellation and a global timeout are checked, after every batch
-   of ``BATCH_SIZE`` rows. Re-importing the same file changes nothing (idempotent): identical
-   switches are reported as *unchanged*.
+   (``skip`` — default — or ``update``) and the mode:
 
-Credentials are never imported: a row may reference an existing credential by name only.
-Export never contains passwords, keys, tokens or host keys.
+   * ``atomic`` (default): the file must be fully valid; every row is applied in ONE
+     transaction — any failure rolls the whole import back (nothing is imported);
+   * ``per_row`` (explicit opt-in): invalid rows are skipped (must be acknowledged) and each row
+     is applied in its own short transaction, so one failing row is reported as *failed*
+     without affecting the others.
+
+   Only one import runs at a time.
+3. ``run_import`` (background task): every row is re-checked against the current inventory,
+   cancellation and a global timeout are checked after every batch of ``BATCH_SIZE`` rows.
+   Re-importing the same file changes nothing (idempotent): identical switches are *unchanged*.
+4. Automatic discovery of the created / changed switches (a background discovery job), for
+   switches whose SSH host key can be trusted without guessing (fingerprint in the file or a
+   key already enrolled).
+
+Credentials are never imported: a row references an existing credential by name only.
+Export never contains passwords, keys or tokens (the public host-key fingerprint is exported so
+that the file can be re-imported securely).
 """
 
 from __future__ import annotations
@@ -28,7 +43,6 @@ import json
 import time
 from dataclasses import dataclass
 from datetime import timedelta
-from types import SimpleNamespace
 
 from sqlalchemy import func, select, update
 from sqlalchemy.exc import IntegrityError
@@ -48,7 +62,8 @@ from app.models import (
     Switch,
     User,
 )
-from app.services.alcatel.registry import load_profiles, select_profile
+from app.services.alcatel.profiles import model_family, version_matches_prefix
+from app.services.alcatel.registry import load_profiles
 from app.services.audit.service import record
 
 log = get_logger("inventory.bulk")
@@ -61,19 +76,29 @@ PREVIEW_TTL = timedelta(minutes=30)
 JOB_TIMEOUT_SECONDS = 900
 FINISHED_ROWS_KEPT = 50  # finished jobs whose row details are kept (older ones keep counts only)
 
-REQUIRED = ("name", "management_ip", "model", "aos_version")
-OPTIONAL = ("hostname", "site", "location", "description", "role", "ssh_port", "enabled",
-            "credential", "uplink_ports")
+REQUIRED = ("name", "management_ip")
+OPTIONAL = ("hostname", "site", "location", "description", "role", "environment", "ssh_port",
+            "enabled", "credential", "expected_model", "expected_aos_version",
+            "ssh_host_key_fingerprint", "uplink_ports")
+# Alternative column names (e.g. files written for older versions) -> canonical column.
+ALIASES = {"model": "expected_model", "aos_version": "expected_aos_version",
+           "credential_reference": "credential"}
 JSON_ONLY = ("port_locations",)
-EXPORT_ONLY = ("status", "created_at", "updated_at")   # present in exports; ignored on import
+# Present in exports (discovered facts / state); ignored on import.
+EXPORT_ONLY = ("vendor", "discovered_model", "discovered_aos_version", "discovery_status",
+               "status", "created_at", "updated_at")
 SECRET_LIKE = ("password", "passwd", "pass", "secret", "token", "key", "private_key", "ssh_key",
                "community", "enable_password", "api_key", "credential_password")
-EXPORT_FIELDS = ("name", "hostname", "management_ip", "ssh_port", "model", "aos_version",
-                 "site", "location", "description", "role", "enabled", "credential",
-                 "uplink_ports", "status", "created_at", "updated_at")
+EXPORT_FIELDS = ("name", "hostname", "management_ip", "ssh_port", "credential_reference",
+                 "ssh_host_key_fingerprint", "expected_model", "expected_aos_version", "site",
+                 "location", "description", "role", "environment", "enabled", "uplink_ports",
+                 "vendor", "discovered_model", "discovered_aos_version", "discovery_status",
+                 "status", "created_at", "updated_at")
 # Fields compared with an existing switch (what an import can set).
-COMPARED = ("hostname", "host", "ssh_port", "model", "aos_version", "site", "location",
-            "description", "role", "enabled", "credential_id", "uplink_ports", "port_locations")
+COMPARED = ("hostname", "host", "ssh_port", "expected_model", "expected_aos_version",
+            "expected_host_key_fingerprint", "environment", "site", "location", "description",
+            "role", "enabled", "credential_id", "uplink_ports", "port_locations")
+MODES = ("atomic", "per_row")
 
 
 class FileRejected(Exception):
@@ -83,6 +108,16 @@ class FileRejected(Exception):
 # ------------------------------------------------------------------------------ parsing ---
 def _column(name: str) -> str:
     return name.strip().lower().replace(" ", "_").replace("-", "_")
+
+
+def _canonical_columns(columns: list[str]) -> list[str]:
+    """Map alias columns to their canonical name; a column and its alias together is ambiguous."""
+    out = [ALIASES.get(c, c) for c in columns]
+    for alias, canonical in ALIASES.items():
+        if alias in columns and canonical in columns:
+            raise FileRejected(f"Columns {alias!r} and {canonical!r} mean the same thing; use "
+                               f"only {canonical!r}.")
+    return out
 
 
 def _check_header(columns: list[str]) -> None:
@@ -134,7 +169,7 @@ def _parse_csv(content: str) -> list[tuple[int, dict | None, str]]:
         raise FileRejected("The file is empty.") from None
     except csv.Error as exc:
         raise FileRejected(f"The header row cannot be parsed: {exc}.") from exc
-    columns = [_column(c) for c in header]
+    columns = _canonical_columns([_column(c) for c in header])
     _check_header(columns)
     rows: list[tuple[int, dict | None, str]] = []
     while True:
@@ -177,8 +212,12 @@ def _parse_json(content: str) -> list[tuple[int, dict | None, str]]:
             continue
         row: dict = {}
         problem = ""
-        for key, value in item.items():
-            col = _column(str(key))
+        try:
+            keys = _canonical_columns([_column(str(k)) for k in item])
+        except FileRejected as exc:
+            rows.append((index, None, str(exc)))
+            continue
+        for col, value in zip(keys, item.values(), strict=True):
             if col == "uplink_ports" and isinstance(value, list) and all(
                     isinstance(v, str) for v in value):
                 row[col] = ";".join(value)
@@ -246,8 +285,11 @@ def validate_row(raw: dict, inv: Inventory) -> tuple[dict, list[str], list[str]]
         warnings.extend(ip_warnings)
     except ValueError as exc:
         errors.append(str(exc))
-    take("model", fields.model, get("model"))
-    take("aos_version", fields.aos_version, get("aos_version"))
+    take("expected_model", fields.expected_model, get("expected_model"))
+    take("expected_aos_version", fields.expected_aos_version, get("expected_aos_version"))
+    take("expected_host_key_fingerprint", fields.host_key_fingerprint,
+         get("ssh_host_key_fingerprint"))
+    take("environment", fields.environment, get("environment"))
     take("site", fields.free_text, get("site"), "site", 128)
     take("location", fields.free_text, get("location"), "location", 128)
     take("description", fields.free_text, get("description"), "description", 255)
@@ -274,15 +316,45 @@ def validate_row(raw: dict, inv: Inventory) -> tuple[dict, list[str], list[str]]
                         "SSH credential is assigned.")
 
     if not errors:
-        probe = SimpleNamespace(model=data["model"], aos_version=data["aos_version"],
-                                profile_key="")
-        profile, reason = select_profile(inv.profiles, probe)
-        if profile is None:
-            errors.append(f"Unsupported model/AOS version: {reason}")
+        coverage = _coverage_warning(data["expected_model"], data["expected_aos_version"],
+                                     inv.profiles)
+        if coverage:
+            warnings.append(coverage)
+        if not data["expected_host_key_fingerprint"]:
+            warnings.append("No ssh_host_key_fingerprint: automatic discovery starts after an "
+                            "administrator has verified and trusted the SSH host key on the "
+                            "switch page.")
         if data["role"] == "unknown":
             warnings.append("Role is 'unknown': MAC_OPERATOR restarts are only possible on "
                             "switches with role 'access'.")
     return data, errors, warnings
+
+
+def _coverage_warning(model: str, version: str, profiles: dict) -> str | None:
+    """Expected metadata is not trusted, but tell the administrator early when no command
+    profile would cover it (the switch would be discovered but not operable)."""
+    if not model and not version:
+        return None
+    family = model_family(model) if model else None
+    for profile in profiles.values():
+        if not profile.enabled:
+            continue
+        if model and family not in profile.supported_models:
+            continue
+        if version and not any(version_matches_prefix(version, v) or version.startswith(v)
+                               for v in profile.version_prefixes):
+            continue
+        return None
+    return (f"No command profile covers the expected {model or ''} {version or ''}".rstrip()
+            + ": after discovery the switch will be identified but no operation will be "
+              "available.")
+
+
+def _current(sw: Switch, key: str):
+    if key == "expected_host_key_fingerprint":
+        # An enrolled key counts: exporting it and importing it again changes nothing.
+        return sw.expected_host_key_fingerprint or sw.host_key_fingerprint
+    return getattr(sw, key)
 
 
 def _existing_diff(sw: Switch, data: dict) -> list[str]:
@@ -290,7 +362,9 @@ def _existing_diff(sw: Switch, data: dict) -> list[str]:
     for key in COMPARED:
         if key not in data:
             continue
-        current = getattr(sw, key)
+        if key == "expected_host_key_fingerprint" and not data[key]:
+            continue  # not given: an import never removes a fingerprint
+        current = _current(sw, key)
         new = data[key]
         if key == "host":
             current, new = (current or "").lower(), (new or "").lower()
@@ -353,6 +427,13 @@ def evaluate_rows(parsed: list[tuple[int, dict | None, str]], inv: Inventory) ->
             if owner is not None and (existing is None or owner.id != existing.id):
                 errors.append(f"Hostname {data['hostname']!r} already belongs to switch "
                               f"{owner.name!r}.")
+            if existing is not None and existing.host_key_fingerprint and \
+                    data["expected_host_key_fingerprint"] and \
+                    data["expected_host_key_fingerprint"] != existing.host_key_fingerprint:
+                errors.append(f"ssh_host_key_fingerprint differs from the host key already "
+                              f"trusted for switch {existing.name!r}. Nothing is trusted "
+                              "automatically: clear the trusted key on the switch page first "
+                              "if the switch was really replaced.")
             if not errors:
                 if existing is None:
                     entry["action"] = "create"
@@ -440,7 +521,7 @@ async def get_job(db: AsyncSession, job_id: str) -> ImportJob:
 
 
 async def confirm_import(db: AsyncSession, user: User, job_id: str, *, on_existing: str,
-                         skip_invalid: bool, ip: str) -> ImportJob:
+                         skip_invalid: bool, ip: str, mode: str = "atomic") -> ImportJob:
     job = await get_job(db, job_id)
     if job.created_by_id != user.id:
         raise ConflictError("An import can only be confirmed by the administrator who "
@@ -454,6 +535,13 @@ async def confirm_import(db: AsyncSession, user: User, job_id: str, *, on_existi
         raise ConflictError("The preview expired. Upload the file again.")
     if job.valid == 0:
         raise ValidationFailedError("The file contains no valid rows; nothing can be imported.")
+    if mode not in MODES:
+        raise ValidationFailedError("mode must be 'atomic' or 'per_row'.")
+    if mode == "atomic" and job.invalid:
+        raise ValidationFailedError(
+            f"{job.invalid} row(s) are invalid. An atomic import imports every row or none: "
+            "fix the file and upload it again, or choose the per-row mode to skip invalid "
+            "rows.", code="INVALID_ROWS_ATOMIC")
     if (job.invalid or job.duplicates) and not skip_invalid:
         raise ValidationFailedError(
             f"{job.invalid} invalid and {job.duplicates} duplicate row(s) would be skipped. "
@@ -466,14 +554,16 @@ async def confirm_import(db: AsyncSession, user: User, job_id: str, *, on_existi
                             code="IMPORT_RUNNING")
     job.on_existing = on_existing
     job.skip_invalid = skip_invalid
+    job.mode = mode
     job.status = ImportStatus.QUEUED.value
     job.confirmed_at = utcnow()
     await db.commit()
     await record(db, action="SWITCH_IMPORT_START", result="INFO", user=user, ip=ip,
                  target_type="import_job", target_id=job.id, target_label=job.filename,
                  message=f"Switch import confirmed ({job.valid} valid rows, existing switches: "
-                         f"{on_existing})",
-                 details={"on_existing": on_existing, "skip_invalid": skip_invalid})
+                         f"{on_existing}, mode: {mode})",
+                 details={"on_existing": on_existing, "skip_invalid": skip_invalid,
+                          "mode": mode})
     return job
 
 
@@ -482,15 +572,23 @@ async def cancel_import(db: AsyncSession, user: User, job_id: str, ip: str) -> I
     if job.status in (ImportStatus.VALIDATED.value, ImportStatus.QUEUED.value):
         job.status = ImportStatus.CANCELLED.value
         job.completed_at = utcnow()
+    elif job.status == ImportStatus.RUNNING.value and job.mode == "atomic":
+        # The running transaction may hold the database write lock (SQLite): signal in memory;
+        # the import stops after the current batch and rolls back completely.
+        _ATOMIC_CANCEL.add(job.id)
     elif job.status == ImportStatus.RUNNING.value:
         job.cancel_requested = True  # stops after the current batch (already-imported rows stay)
     else:
         raise ConflictError(f"This import is {job.status}; nothing to cancel.")
-    await db.commit()
+    if job.id not in _ATOMIC_CANCEL:
+        await db.commit()
     await record(db, action="SWITCH_IMPORT_CANCEL", result="INFO", user=user, ip=ip,
                  target_type="import_job", target_id=job.id, target_label=job.filename,
                  message=f"Import cancel requested (status {job.status})")
     return job
+
+
+_ATOMIC_CANCEL: set[str] = set()
 
 
 def _apply(sw: Switch, data: dict) -> bool:
@@ -498,10 +596,15 @@ def _apply(sw: Switch, data: dict) -> bool:
     endpoint_changed = (sw.host or "").lower() != data["host"].lower() or \
         sw.ssh_port != data["ssh_port"]
     for key in COMPARED:
+        if key == "expected_host_key_fingerprint" and not data.get(key):
+            continue
         if key in data:
             setattr(sw, key, data[key])
     if endpoint_changed:
         sw.host_key, sw.host_key_fingerprint = "", ""  # new endpoint: re-enrol the host key
+        # Possibly another device: its identity must be discovered again.
+        sw.discovery_status = "not_discovered"
+        sw.discovery_error = "Management address changed by an import: rediscovery required."
     return endpoint_changed
 
 
@@ -521,9 +624,10 @@ async def _process_row(db: AsyncSession, row: dict, on_existing: str) -> None:
         row["result"], row["message"] = "failed", "The referenced credential was deleted."
         return
     if existing is None:
-        db.add(Switch(**{k: v for k, v in data.items()}, transport="ssh"))
+        sw = Switch(**dict(data.items()), transport="ssh")
+        db.add(sw)
         await db.flush()
-        row["result"], row["message"] = "imported", "Created."
+        row["result"], row["message"], row["switch_id"] = "imported", "Created.", sw.id
         return
     diff = _existing_diff(existing, data)
     if not diff:
@@ -531,12 +635,93 @@ async def _process_row(db: AsyncSession, row: dict, on_existing: str) -> None:
     elif on_existing == "update":
         endpoint = _apply(existing, data)
         await db.flush()
-        row["result"] = "updated"
+        row["result"], row["switch_id"] = "updated", existing.id
         row["message"] = f"Updated: {', '.join(diff)}" + (
             " (host key cleared: new SSH endpoint)" if endpoint else "")
     else:
         row["result"], row["message"] = "skipped", (
             f"Exists with different values ({', '.join(diff)}); not changed.")
+
+
+class _AtomicAbort(Exception):
+    """Stops an atomic import; everything done so far is rolled back."""
+
+
+async def _run_per_row(db: AsyncSession, job_id: str, todo: list[dict], on_existing: str,
+                       counts: dict, processed: int, started: float) -> tuple[ImportStatus, str,
+                                                                                int]:
+    """Each row in its own short transaction (explicit opt-in)."""
+    outcome, error = ImportStatus.COMPLETED, ""
+    for start in range(0, len(todo), BATCH_SIZE):
+        if time.monotonic() - started > JOB_TIMEOUT_SECONDS:
+            return ImportStatus.FAILED, (
+                f"Import stopped after {JOB_TIMEOUT_SECONDS}s (timeout); the rows processed so "
+                "far were imported. Run the import again to continue (already imported "
+                "switches are reported as unchanged)."), processed
+        cancel = (await db.execute(select(ImportJob.cancel_requested).where(
+            ImportJob.id == job_id))).scalar_one()
+        if cancel:
+            return ImportStatus.CANCELLED, (
+                "Cancelled by an administrator; the rows processed before the cancellation "
+                "were imported."), processed
+        for row in todo[start:start + BATCH_SIZE]:
+            try:
+                await _process_row(db, row, on_existing)
+                await db.commit()  # one short transaction per row
+            except IntegrityError as exc:
+                await db.rollback()
+                row["result"] = "failed"
+                row["message"] = ("Rejected by a database constraint (the name, address or "
+                                  "hostname was taken concurrently).")
+                log.warning("Import %s line %s rejected: %s", job_id, row["line"],
+                            exc.__class__.__name__)
+            counts[row["result"] if row["result"] in counts else "failed"] += 1
+            processed += 1
+        await db.execute(update(ImportJob).where(ImportJob.id == job_id).values(
+            processed=processed, **counts))
+        await db.commit()
+        await asyncio.sleep(0)
+    return outcome, error, processed
+
+
+async def _run_atomic(db: AsyncSession, job_id: str, todo: list[dict], on_existing: str,
+                      counts: dict, processed: int, started: float) -> tuple[ImportStatus, str,
+                                                                               int]:
+    """Every row in ONE transaction: all rows are imported, or none (any failure, the timeout
+    or a cancellation rolls everything back). Progress is not written while the transaction is
+    open (it would wait for its own write lock on SQLite)."""
+    done = dict.fromkeys(counts, 0)
+    try:
+        for start in range(0, len(todo), BATCH_SIZE):
+            if time.monotonic() - started > JOB_TIMEOUT_SECONDS:
+                raise _AtomicAbort(f"Import stopped after {JOB_TIMEOUT_SECONDS}s (timeout).")
+            if job_id in _ATOMIC_CANCEL:
+                raise _AtomicAbort("Cancelled by an administrator.")
+            for row in todo[start:start + BATCH_SIZE]:
+                await _process_row(db, row, on_existing)
+                if row["result"] == "failed":
+                    raise _AtomicAbort(f"Line {row['line']}: {row['message']}")
+                done[row["result"]] += 1
+            await asyncio.sleep(0)
+        await db.commit()
+    except (_AtomicAbort, IntegrityError) as exc:
+        await db.rollback()
+        reason = str(exc) if isinstance(exc, _AtomicAbort) else (
+            "a row was rejected by a database constraint (name, address or hostname taken "
+            "concurrently)")
+        for row in todo:
+            if row.get("result") in ("imported", "updated"):
+                row["message"] = "Rolled back (atomic import)."
+            row["result"] = "rolled_back" if row.get("result") else "not_processed"
+        counts["failed"] = len(todo)
+        status = ImportStatus.CANCELLED if job_id in _ATOMIC_CANCEL else ImportStatus.FAILED
+        return status, (f"Atomic import rolled back: {reason} Nothing was imported; the "
+                        "inventory is unchanged."), processed
+    finally:
+        _ATOMIC_CANCEL.discard(job_id)
+    for key, value in done.items():
+        counts[key] += value
+    return ImportStatus.COMPLETED, "", processed + len(todo)
 
 
 async def run_import(job_id: str) -> None:
@@ -549,6 +734,7 @@ async def run_import(job_id: str) -> None:
         job.started_at = utcnow()
         await db.commit()
         on_existing, created_by, filename = job.on_existing, job.created_by, job.filename
+        mode, creator_id = job.mode or "atomic", job.created_by_id
         rows = [dict(r) for r in job.rows or []]
         for r in rows:
             if r["status"] != "valid":
@@ -558,48 +744,26 @@ async def run_import(job_id: str) -> None:
         counts = {"imported": 0, "updated": 0, "unchanged": 0, "failed": 0,
                   "skipped": len(rows) - len(todo)}
         processed = len(rows) - len(todo)
-        outcome, error = ImportStatus.COMPLETED, ""
+        runner = _run_atomic if mode == "atomic" else _run_per_row
         try:
-            for start in range(0, len(todo), BATCH_SIZE):
-                if time.monotonic() - started > JOB_TIMEOUT_SECONDS:
-                    outcome, error = ImportStatus.FAILED, (
-                        f"Import stopped after {JOB_TIMEOUT_SECONDS}s (timeout); the rows "
-                        "processed so far were imported. Run the import again to continue "
-                        "(already imported switches are reported as unchanged).")
-                    break
-                cancel = (await db.execute(select(ImportJob.cancel_requested).where(
-                    ImportJob.id == job_id))).scalar_one()
-                if cancel:
-                    outcome, error = ImportStatus.CANCELLED, (
-                        "Cancelled by an administrator; the rows processed before the "
-                        "cancellation were imported.")
-                    break
-                for row in todo[start:start + BATCH_SIZE]:
-                    try:
-                        await _process_row(db, row, on_existing)
-                        await db.commit()  # one short transaction per row
-                    except IntegrityError as exc:
-                        await db.rollback()
-                        row["result"] = "failed"
-                        row["message"] = ("Rejected by a database constraint (the name, "
-                                          "address or hostname was taken concurrently).")
-                        log.warning("Import %s line %s rejected: %s", job_id, row["line"],
-                                    exc.__class__.__name__)
-                    counts[row["result"] if row["result"] in counts else "failed"] += 1
-                    processed += 1
-                await db.execute(update(ImportJob).where(ImportJob.id == job_id).values(
-                    processed=processed, **counts))
-                await db.commit()
-                await asyncio.sleep(0)
+            outcome, error, processed = await runner(db, job_id, todo, on_existing, counts,
+                                                     processed, started)
         except Exception as exc:  # noqa: BLE001 - the job must end in a final state
             log.exception("Import %s crashed", job_id)
             await db.rollback()
             outcome, error = ImportStatus.FAILED, (
-                f"Internal error ({exc.__class__.__name__}); rows committed before the error "
-                "remain imported. Run the import again to continue.")
+                f"Internal error ({exc.__class__.__name__}); "
+                + ("nothing was imported (atomic import rolled back)." if mode == "atomic" else
+                   "rows committed before the error remain imported. Run the import again to "
+                   "continue."))
+            if mode == "atomic":
+                for r in todo:
+                    r["result"] = "rolled_back" if r.get("result") else "not_processed"
         for r in rows:
             if not r.get("result"):
                 r["result"], r["message"] = "not_processed", "Not processed."
+        changed_ids = [r["switch_id"] for r in rows if r.get("result") in ("imported", "updated")
+                       and r.get("switch_id")]
         now = utcnow()
         await db.execute(update(ImportJob).where(ImportJob.id == job_id).values(
             rows=rows, processed=processed, status=outcome.value, error=error,
@@ -611,11 +775,33 @@ async def run_import(job_id: str) -> None:
                      ImportStatus.COMPLETED and not counts["failed"] else "FAILED",
                      username=created_by, role="admin", target_type="import_job",
                      target_id=job_id, target_label=filename,
-                     message=f"Switch import {outcome.value}: {counts['imported']} imported, "
-                             f"{counts['updated']} updated, {counts['unchanged']} unchanged, "
-                             f"{counts['skipped']} skipped, {counts['failed']} failed"
+                     message=f"Switch import ({mode}) {outcome.value}: {counts['imported']} "
+                             f"imported, {counts['updated']} updated, {counts['unchanged']} "
+                             f"unchanged, {counts['skipped']} skipped, {counts['failed']} failed"
                              + (f" — {error}" if error else ""),
-                     details={**counts, "changed_switches": names[:2000]})
+                     details={**counts, "mode": mode, "changed_switches": names[:2000]})
+        await _discover_imported(db, job_id, creator_id, changed_ids)
+
+
+async def _discover_imported(db: AsyncSession, job_id: str, creator_id: int | None,
+                             switch_ids: list[int]) -> None:
+    """Automatic discovery after the import, for the switches that can be reached without
+    trusting an unverified host key."""
+    from app.services.discovery.service import can_discover, create_job
+
+    if not switch_ids or creator_id is None:
+        return
+    user = await db.get(User, creator_id)
+    if user is None:
+        return
+    switches = (await db.execute(select(Switch).where(Switch.id.in_(switch_ids)))).scalars()
+    ids = [sw.id for sw in switches if can_discover(sw)]
+    if not ids:
+        return
+    discovery_job = await create_job(db, user, ids, source="import")
+    await db.execute(update(ImportJob).where(ImportJob.id == job_id).values(
+        discovery_job_id=discovery_job.id))
+    await db.commit()
 
 
 async def mark_interrupted_imports(db: AsyncSession) -> int:
@@ -635,7 +821,8 @@ def job_view(job: ImportJob, *, include_rows: bool = True) -> dict:
         "id": job.id, "status": job.status, "file_format": job.file_format,
         "filename": job.filename, "created_by": job.created_by,
         "on_existing": job.on_existing, "skip_invalid": job.skip_invalid,
-        "cancel_requested": job.cancel_requested,
+        "mode": job.mode, "discovery_job_id": job.discovery_job_id or None,
+        "cancel_requested": job.cancel_requested or job.id in _ATOMIC_CANCEL,
         "total": job.total, "valid": job.valid, "invalid": job.invalid,
         "duplicates": job.duplicates, "warnings": job.warnings, "processed": job.processed,
         "imported": job.imported, "updated": job.updated, "unchanged": job.unchanged,
@@ -676,12 +863,18 @@ def _export_record(sw: Switch, credential_names: dict[int, str]) -> dict:
     """Only inventory metadata. Never passwords, keys, tokens or host keys."""
     return {
         "name": sw.name, "hostname": sw.hostname, "management_ip": sw.host,
-        "ssh_port": sw.ssh_port, "model": sw.model, "aos_version": sw.aos_version,
+        "ssh_port": sw.ssh_port,
+        "credential_reference": credential_names.get(sw.credential_id or 0, ""),
+        # Public fingerprint (not a secret): lets the file be re-imported without trusting an
+        # unverified key.
+        "ssh_host_key_fingerprint": sw.expected_host_key_fingerprint or sw.host_key_fingerprint,
+        "expected_model": sw.expected_model, "expected_aos_version": sw.expected_aos_version,
         "site": sw.site, "location": sw.location, "description": sw.description,
-        "role": sw.role, "enabled": sw.enabled,
-        "credential": credential_names.get(sw.credential_id or 0, ""),
+        "role": sw.role, "environment": sw.environment, "enabled": sw.enabled,
         "uplink_ports": list(sw.uplink_ports or []),
         "port_locations": dict(sw.port_locations or {}),
+        "vendor": sw.vendor, "discovered_model": sw.model,
+        "discovered_aos_version": sw.aos_version, "discovery_status": sw.discovery_status,
         "status": sw.status,
         "created_at": sw.created_at.isoformat() if sw.created_at else "",
         "updated_at": sw.updated_at.isoformat() if sw.updated_at else "",
@@ -709,14 +902,19 @@ async def export_switches(db: AsyncSession, file_format: str) -> tuple[str, int]
     return buf.getvalue(), len(records)
 
 
+# Model / AOS version are discovered; the fingerprint comes from the switch console
+# (verified out of band). The expected_* columns are optional.
 TEMPLATE_CSV = (
-    "name,hostname,management_ip,model,aos_version,site,role,ssh_port,enabled,credential\r\n"
-    "R-BY-NET-SW-1,sw01,172.17.2.10,OS6360,8.10R1,Main,access,22,true,switch-readonly\r\n"
-    "R-BY-NET-SW-2,sw02,172.17.2.11,OS6450,6.7.1,Main,access,22,true,switch-readonly\r\n"
+    "name,hostname,management_ip,ssh_port,credential_reference,ssh_host_key_fingerprint,"
+    "site,role,environment,enabled,expected_model,expected_aos_version\r\n"
+    "R-BY-NET-SW-1,sw01,172.17.2.10,22,switch-readonly,,Main,access,production,true,,\r\n"
+    "R-BY-NET-SW-2,sw02,172.17.2.11,22,switch-readonly,,Main,access,production,true,OS6450,"
+    "6.7.1\r\n"
 )
 TEMPLATE_JSON = json.dumps({"switches": [
     {"name": "R-BY-NET-SW-1", "hostname": "sw01", "management_ip": "172.17.2.10",
-     "model": "OS6360", "aos_version": "8.10R1", "site": "Main", "role": "access",
-     "ssh_port": 22, "enabled": True, "credential": "switch-readonly",
+     "ssh_port": 22, "credential_reference": "switch-readonly",
+     "ssh_host_key_fingerprint": "", "site": "Main", "role": "access",
+     "environment": "production", "enabled": True,
      "port_locations": {"1/1/5": "Building A - Floor 2 - Office 204"}},
 ]}, indent=2)

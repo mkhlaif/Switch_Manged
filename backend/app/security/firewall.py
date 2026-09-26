@@ -221,6 +221,21 @@ class VerificationResult:
     required: bool
     verified: bool
     detail: str
+    # Profile state that was found: LAB_VERIFIED | PRODUCTION_VERIFIED (verified results
+    # without an explicit level count as LAB_VERIFIED — never more).
+    level: str = ""
+
+    @property
+    def effective_level(self) -> str:
+        if not self.verified:
+            return ""
+        return self.level if self.level in _LEVELS else "LAB_VERIFIED"
+
+    def meets(self, minimum: str) -> bool:
+        return self.verified and _LEVELS.get(self.effective_level, 0) >= _LEVELS[minimum]
+
+
+_LEVELS = {"LAB_VERIFIED": 1, "PRODUCTION_VERIFIED": 2}
 
 
 VerificationProvider = Callable[[str, str, "str | None", "str | None"],
@@ -241,7 +256,8 @@ async def load_verification(profile_key: str, capability: str, model: str | None
                 required = bool(await system_settings.get_value(db, "require_lab_verification"))
             st = await verification_status(db, profile_key, capability, model, version,
                                            required=required)
-        return VerificationResult(st.required, st.verified, st.detail)
+        return VerificationResult(st.required, st.verified or (
+            st.level in _LEVELS), st.detail, st.level if st.level in _LEVELS else "")
     except Exception as exc:  # noqa: BLE001 - fail closed
         return VerificationResult(True, False, f"verification records unavailable "
                                                f"({exc.__class__.__name__})")
@@ -572,13 +588,24 @@ class CommandSafetyFirewall:
                                 is_linkagg: bool, switch_role: str, model: str | None,
                                 version: str | None, trunk_override_confirmed: bool,
                                 operator_classes: set[str], confirmed: bool,
+                                discovery_status: str = "not_discovered",
+                                transport: str = "ssh", environment: str = "production",
                                 ) -> RestartAuthorization:
-        """Issue a restart authorization after re-checking everything the firewall can check."""
+        """Issue a restart authorization after re-checking everything the firewall can check.
+
+        Fail-closed defaults: an undiscovered device, and a production switch unless the
+        strategy is PRODUCTION_VERIFIED, never get an authorization."""
         from app.security.restart_policy import evaluate_restart_policy
         from app.services.classification.engine import PortClass
 
         op = Operation.RESTART_PORT.value
         self.ensure_ready()
+        if discovery_status != "discovered":
+            raise CommandBlocked("Device identity not verified by discovery (status "
+                                 f"{discovery_status}). UNKNOWN DEVICE = NO STATE-CHANGING "
+                                 "OPERATION. No command was executed.",
+                                 severity=Severity.WARNING, event="DEVICE_NOT_DISCOVERED",
+                                 operation=op)
         if ctx.role not in COMMAND_POLICIES[Operation.RESTART_PORT].allowed_roles:
             raise CommandBlocked("Role may not restart ports.", severity=Severity.HIGH,
                                  event="ROLE_NOT_PERMITTED", operation=op)
@@ -615,10 +642,14 @@ class CommandSafetyFirewall:
                                  operation=op)
         verification = await self.verification(profile.key, strategy_spec.strategy.value, model,
                                                version)
-        if not verification.verified:
-            raise CommandBlocked(f"Restart strategy not lab-verified: {verification.detail}. No "
-                                 "command was executed.", severity=Severity.WARNING,
-                                 event="STRATEGY_NOT_VERIFIED", operation=op)
+        minimum = "LAB_VERIFIED" if transport == "simulator" or environment == "lab" \
+            else "PRODUCTION_VERIFIED"
+        if not verification.meets(minimum):
+            raise CommandBlocked(f"Restart strategy not {minimum} for this switch: "
+                                 f"{verification.detail}. PROFILE NOT VERIFIED = NO PRODUCTION "
+                                 "EXECUTION. No command was executed.",
+                                 severity=Severity.WARNING, event="STRATEGY_NOT_VERIFIED",
+                                 operation=op)
         try:
             check_strategy_templates(strategy_spec.strategy.value, strategy_spec.down_template,
                                      strategy_spec.up_template)
@@ -784,7 +815,7 @@ class FirewallSession:
         model = info.model if info.model and _MODEL_RE.match(info.model) else None
         return SystemInfo(description=info.description, model=model, version=version,
                           name=info.name, location=info.location, contact=info.contact,
-                          uptime=info.uptime)
+                          uptime=info.uptime, object_id=info.object_id, vendor=info.vendor)
 
     @asynccontextmanager
     async def restart(self, authorization: RestartAuthorization

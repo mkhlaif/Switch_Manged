@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
 from dataclasses import dataclass
 
 from sqlalchemy import select
@@ -59,9 +61,19 @@ async def load_profiles(db: AsyncSession) -> dict[str, CommandProfile]:
     return profiles
 
 
+_IDENTIFIED = frozenset({"discovered", "mismatch"})  # DiscoveryStatus values with an identity
+
+
 def select_profile(profiles: dict[str, CommandProfile], switch) -> tuple[CommandProfile | None, str]:
     """Return (profile, reason). The profile is None when no verified profile applies to the
-    switch's exact model family and AOS version (fail closed)."""
+    switch's exact model family and AOS version (fail closed).
+
+    Inventory switches carry ``discovery_status``: their model / version are only trusted once
+    they come from automatic discovery (never from what someone typed in)."""
+    status = getattr(switch, "discovery_status", None)
+    if status is not None and status not in _IDENTIFIED:
+        return None, (f"{UNAVAILABLE}: the device identity has not been discovered yet "
+                      f"({status.replace('_', ' ')}). Run discovery first.")
     if switch.profile_key:
         profile = profiles.get(switch.profile_key)
         if profile is None:
@@ -86,17 +98,49 @@ def select_profile(profiles: dict[str, CommandProfile], switch) -> tuple[Command
     return profile, why
 
 
+def profile_version(profile: CommandProfile) -> str:
+    """Short content hash of a profile definition: identifies exactly which commands /
+    parsers an action or audit entry used (a changed custom profile gets a new version)."""
+    blob = json.dumps(profile.to_dict(), sort_keys=True, separators=(",", ":"))
+    return hashlib.sha256(blob.encode()).hexdigest()[:12]
+
+
+LEVELS = {"LAB_VERIFIED": 1, "PRODUCTION_VERIFIED": 2}
+
+
+def required_level(switch) -> str:
+    """State changes on production switches need PRODUCTION_VERIFIED; lab switches (and the
+    in-process simulator) LAB_VERIFIED."""
+    if getattr(switch, "transport", "ssh") == "simulator" or \
+            getattr(switch, "environment", "production") == "lab":
+        return "LAB_VERIFIED"
+    return "PRODUCTION_VERIFIED"
+
+
+def _specific_prefix(prefix: str) -> bool:
+    """A record must name at least major.minor (e.g. 8.10): "8" would claim every 8.x
+    release, which nobody has verified."""
+    return len(prefix.split(".")) >= 2
+
+
 @dataclass
 class VerificationStatus:
     required: bool
     verified: bool
     detail: str
     record_id: int | None = None
+    level: str = ""  # best active state found: LAB_VERIFIED | PRODUCTION_VERIFIED | BLOCKED | ""
 
 
 async def verification_status(db: AsyncSession, profile_key: str, capability: str,
                               model: str | None, version: str | None,
-                              *, required: bool = True) -> VerificationStatus:
+                              *, required: bool = True,
+                              minimum: str = "LAB_VERIFIED") -> VerificationStatus:
+    """Profile state of ``capability`` for this exact model family and AOS version.
+
+    No record = DRAFT (not usable). A matching BLOCKED record wins over everything. DEPRECATED
+    records are ignored. Records for all models ("*", legacy) never count as
+    PRODUCTION_VERIFIED: production needs the exact model family."""
     family = model_family(model)
     if family is None or not version:
         return VerificationStatus(required, False, "model family or AOS version unknown")
@@ -104,14 +148,35 @@ async def verification_status(db: AsyncSession, profile_key: str, capability: st
         CommandVerification.profile_key == profile_key,
         CommandVerification.capability == capability,
     ))).scalars().all()
-    for row in rows:
-        if row.model_family in {family, "*"} and version_matches_prefix(version, row.version_prefix):
-            return VerificationStatus(required, True,
-                                      f"{capability} lab-verified for {row.model_family} AOS "
-                                      f"{row.version_prefix} by {row.verified_by}", row.id)
-    return VerificationStatus(required, False,
-                              f"{capability} of profile {profile_key} is not lab-verified for "
-                              f"{family} AOS {version}")
+    matching = [r for r in rows if r.model_family in {family, "*"}
+                and _specific_prefix(r.version_prefix)
+                and version_matches_prefix(version, r.version_prefix)]
+    blocked = next((r for r in matching if r.status == "BLOCKED"), None)
+    if blocked is not None:
+        return VerificationStatus(required, False,
+                                  f"{capability} of profile {profile_key} is BLOCKED for "
+                                  f"{blocked.model_family} AOS {blocked.version_prefix} by "
+                                  f"{blocked.status_changed_by or blocked.verified_by}",
+                                  blocked.id, "BLOCKED")
+
+    def effective(r) -> int:
+        level = LEVELS.get(r.status, 0)
+        return min(level, LEVELS["LAB_VERIFIED"]) if r.model_family == "*" else level
+
+    active = sorted((r for r in matching if effective(r)), key=effective, reverse=True)
+    if not active:
+        return VerificationStatus(required, False,
+                                  f"{capability} of profile {profile_key} is not verified "
+                                  f"(DRAFT) for {family} AOS {version}")
+    best = active[0]
+    level = "PRODUCTION_VERIFIED" if effective(best) == 2 else "LAB_VERIFIED"
+    detail = (f"{capability} {level} for {best.model_family} AOS {best.version_prefix} by "
+              f"{best.status_changed_by or best.verified_by}")
+    if LEVELS[level] < LEVELS[minimum]:
+        return VerificationStatus(required, False,
+                                  f"{detail}; production switches need {minimum}", best.id,
+                                  level)
+    return VerificationStatus(required, True, detail, best.id, level)
 
 
 @dataclass
@@ -151,12 +216,11 @@ async def choose_strategy(
                            "appear to be a PoE model.")
             continue
         status = await verification_status(db, profile.key, spec.strategy.value, switch.model,
-                                           switch.aos_version)
+                                           switch.aos_version, minimum=required_level(switch))
         if not status.verified:
             candidate = candidate or spec
-            reasons.append(f"{status.detail}. An administrator must lab-validate it and record "
-                           "the verification (Settings → Command profiles). Dry run is still "
-                           "possible.")
+            reasons.append(f"{status.detail}. An administrator must verify it (Settings → "
+                           "Command profiles). Dry run is still possible.")
             continue
         return StrategyChoice(True, spec, status.detail)
     return StrategyChoice(False, candidate, " ".join(reasons))

@@ -91,12 +91,30 @@ class SafetyState:
         return "ACTIVE"
 
     @property
+    def network_state(self) -> str:
+        """Global network state (§19 vocabulary): EMERGENCY_STOP (kill switch), SAFE_MODE
+        (circuit breaker, or safety state unavailable), READ_ONLY, NORMAL (read-only
+        operations), MAINTENANCE (authorized state changes) — plus EMERGENCY_OVERRIDE for the
+        administrator-only emergency mode."""
+        if not self.available:
+            return "SAFE_MODE"
+        if not self.command_execution_enabled:
+            return "EMERGENCY_STOP"
+        if self.safe_mode:
+            return "SAFE_MODE"
+        return {OperationMode.READ_ONLY.value: "READ_ONLY",
+                OperationMode.NORMAL.value: "NORMAL",
+                OperationMode.MAINTENANCE.value: "MAINTENANCE",
+                OperationMode.EMERGENCY.value: "EMERGENCY_OVERRIDE"}.get(self.mode, "SAFE_MODE")
+
+    @property
     def state_changes_enabled(self) -> bool:
         return self.state_changing_block_reason() is None
 
     def to_dict(self) -> dict:
         data = asdict(self)
         data["state_changing_block_reason"] = self.state_changing_block_reason()
+        data["network_state"] = self.network_state
         data["indicator"] = self.indicator
         data["state_changes_enabled"] = self.state_changes_enabled
         return data

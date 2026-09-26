@@ -45,6 +45,7 @@ from app.models import (
     SwitchResultStatus,
     User,
 )
+from app.parsers.alcatel.system import SystemInfo
 from app.parsers.common import format_mac
 from app.services import system_settings
 from app.security.firewall import CommandBlocked, ExecutionContext, UnexpectedOutput
@@ -56,6 +57,13 @@ from app.services.alcatel.profiles import CommandProfile
 from app.services.alcatel.registry import load_profiles, select_profile
 from app.services.audit.service import record
 from app.services.classification.engine import PortClass
+from app.services.discovery.service import (
+    IDENTIFIED,
+    apply_discovery,
+    audit_outcome,
+    discovery_problem,
+    normalized_version,
+)
 from app.services.inventory.service import (
     build_target,
     known_switches,
@@ -98,6 +106,7 @@ class SwitchSnapshot:
     profile_key: str
     uplink_ports: list[str]
     role: str = "unknown"
+    discovery_status: str = "not_discovered"
 
 
 @dataclass
@@ -120,6 +129,7 @@ class SwitchOutcome:
     duration_ms: int = 0
     reachable: bool = False
     switch_error: SwitchError | None = None
+    discovered: SystemInfo | None = None  # answer of the discovery command, if it ran
 
 
 def _no_profile_message(model: str, version: str, reason: str, *, discovered: bool) -> str:
@@ -131,7 +141,8 @@ def _no_profile_message(model: str, version: str, reason: str, *, discovered: bo
 
 def _snapshot(sw: Switch) -> SwitchSnapshot:
     return SwitchSnapshot(sw.id, sw.name, sw.host, sw.location, sw.model, sw.aos_version,
-                          sw.profile_key, list(sw.uplink_ports or []), sw.role or "unknown")
+                          sw.profile_key, list(sw.uplink_ports or []), sw.role or "unknown",
+                          sw.discovery_status)
 
 
 # --------------------------------------------------------------------------------------------
@@ -211,13 +222,18 @@ async def _search_switch(job: SwitchJob, mac: str, profiles: dict[str, CommandPr
 
     budget = get_settings().ssh_switch_budget_seconds
     detected_model = detected_version = None
+    discovered: SystemInfo | None = None
     commands: list[str] = []
 
-    # Fail closed BEFORE connecting when the version is known but no verified profile exists.
-    profile, reason = select_profile(profiles, snap)  # type: ignore[arg-type]
-    if profile is None and (snap.aos_version or snap.profile_key):
-        return done(SwitchResultStatus.UNSUPPORTED.value, error=_no_profile_message(
-            snap.model, snap.aos_version, reason, discovered=False))
+    # The identity comes from discovery only. Discovered switches: fail closed BEFORE
+    # connecting when no verified profile exists for the discovered model / version.
+    identified = snap.discovery_status in IDENTIFIED
+    profile, reason = None, ""
+    if identified:
+        profile, reason = select_profile(profiles, snap)  # type: ignore[arg-type]
+        if profile is None:
+            return done(SwitchResultStatus.UNSUPPORTED.value, error=_no_profile_message(
+                snap.model, snap.aos_version, reason, discovered=False))
     try:
         # The budget starts once a connection slot is acquired, so switches queued behind the
         # concurrency limit are not penalised. Connect/login have their own SSH timeouts.
@@ -225,11 +241,20 @@ async def _search_switch(job: SwitchJob, mac: str, profiles: dict[str, CommandPr
             async with asyncio.timeout(budget):
                 try:
                     if profile is None:
-                        # Unknown version: only the separately approved discovery command runs.
-                        info = await session.discover()
+                        # Not identified yet: only the separately approved discovery command
+                        # runs; nothing else is sent unless it identifies the device exactly.
+                        discovered = info = await session.discover()
                         detected_model, detected_version = info.model, info.version
-                        snap.model = info.model or snap.model
-                        snap.aos_version = info.version or ""
+                        problem = discovery_problem(info)
+                        if problem:
+                            return done(SwitchResultStatus.DISCOVERY_FAILED.value,
+                                        error=f"DISCOVERY FAILED. {problem} Only the read-only "
+                                              "discovery command was executed.",
+                                        reachable=True, commands=session.executed_commands(),
+                                        discovered=info)
+                        snap.model = info.model or ""
+                        snap.aos_version = normalized_version(info.version)
+                        snap.discovery_status = "discovered"
                         profile, reason = select_profile(profiles, snap)  # type: ignore[arg-type]
                     if profile is None:
                         return done(SwitchResultStatus.UNSUPPORTED.value,
@@ -237,7 +262,7 @@ async def _search_switch(job: SwitchJob, mac: str, profiles: dict[str, CommandPr
                                                               reason, discovered=True),
                                     reachable=True, commands=session.executed_commands(),
                                     detected_model=detected_model,
-                                    detected_version=detected_version)
+                                    detected_version=detected_version, discovered=discovered)
                     await session.bind_profile(profile, model=snap.model or None,
                                                version=snap.aos_version or None)
                     adapter = AlcatelAdapter(session)
@@ -262,17 +287,20 @@ async def _search_switch(job: SwitchJob, mac: str, profiles: dict[str, CommandPr
                               else SwitchResultStatus.NOT_FOUND).value
                     return done(status, profile_key=profile.key, investigations=investigations,
                                 commands=session.executed_commands(), reachable=True,
-                                detected_model=detected_model, detected_version=detected_version)
+                                detected_model=detected_model, detected_version=detected_version,
+                                discovered=discovered)
                 finally:
                     commands = session.executed_commands()
     except CommandBlocked as exc:
         return done(SwitchResultStatus.BLOCKED.value, commands=commands,
                     error=f"{exc.title}: {exc.reason}", reachable=True,
-                    detected_model=detected_model, detected_version=detected_version)
+                    detected_model=detected_model, detected_version=detected_version,
+                    discovered=discovered)
     except UnexpectedOutput as exc:
         return done(SwitchResultStatus.UNEXPECTED_OUTPUT.value, commands=commands,
                     error=f"{exc.title}: {exc.reason}", reachable=True,
-                    detected_model=detected_model, detected_version=detected_version)
+                    detected_model=detected_model, detected_version=detected_version,
+                    discovered=discovered)
     except TimeoutError:
         return done(SwitchResultStatus.TIMEOUT.value, commands=commands,
                     error=f"The switch did not complete the lookup within {budget:.0f}s.")
@@ -281,7 +309,8 @@ async def _search_switch(job: SwitchJob, mac: str, profiles: dict[str, CommandPr
                     error=f"The switch rejected '{exc.command}': {exc.reason}. The selected "
                           "command profile may not be compatible with this AOS version. No "
                           "configuration changes were made.",
-                    detected_model=detected_model, detected_version=detected_version)
+                    detected_model=detected_model, detected_version=detected_version,
+                    discovered=discovered)
     except SwitchError as exc:
         return done(exc.status if exc.status in {s.value for s in SwitchResultStatus}
                     else SwitchResultStatus.ERROR.value,
@@ -455,11 +484,12 @@ async def _run(db: AsyncSession, search: MacSearch) -> None:
         all_rows.extend(rows)
 
         sw = switches.get(outcome.job.snapshot.id)
+        discovery = None
         if sw is not None:
-            if outcome.detected_version:
-                sw.aos_version = outcome.detected_version
-            if outcome.detected_model:
-                sw.model = outcome.detected_model
+            if outcome.discovered is not None:
+                # Same evaluation as an explicit discovery: identity stored, expected metadata
+                # and previous identity compared (MISMATCH blocks state changes), audited.
+                discovery = apply_discovery(sw, outcome.discovered)
             if outcome.reachable:
                 mark_success(sw)
             elif outcome.switch_error is not None:
@@ -478,6 +508,9 @@ async def _run(db: AsyncSession, search: MacSearch) -> None:
         elif outcome.status in FAILURE_STATUSES:
             search.failed_count += 1
         await db.commit()
+        if discovery is not None and sw is not None:
+            await audit_outcome(db, sw, discovery, username=search.requested_by,
+                                source="mac-search")
         broker.publish(search.id, {
             "type": "switch",
             "search_id": search.id,

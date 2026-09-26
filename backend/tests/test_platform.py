@@ -317,20 +317,26 @@ async def test_admin_user_management_and_force_logout(admin, make_client):
 
 
 # ---------------------------------------------------------------- lab verification run ---
-async def test_read_verification_run_records_evidence(admin, operator, lab):
-    ids = await seed_lab_switches(["SIM-SW-01"])
-    body = {"switch_id": ids["SIM-SW-01"], "port": "1/1/26", "mac": MAC_ACCESS, "record": True}
+async def test_read_verification_run_on_simulator_is_never_recorded(admin, operator, lab):
+    ids = await seed_lab_switches(["SIM-SW-01", "SIM-SW-03"], unknown_version=("SIM-SW-03",))
+    body = {"switch_id": ids["SIM-SW-01"], "port": "1/1/26", "mac": MAC_ACCESS}
     assert (await operator.post("/api/profiles/verifications/run", json=body)).status_code == 403
     result = (await admin.post("/api/profiles/verifications/run", json=body)).json()
-    assert result["passed"] is True and result["recorded"] is True
+    assert result["passed"] is True and result["recorded"] is False
     assert result["model_family"] == "OS6860" and result["version_prefix"] == "8.9"
+    assert result["transport"] == "simulator" and result["evidence_level"] == "SIMULATED"
     statuses = {r["command_key"]: r["status"] for r in result["results"]}
     assert statuses["mac_lookup"] == statuses["port_detail"] == statuses["lldp_port"] == "ok"
     assert statuses["vlan_linkagg"] == "not_exercised"
     assert all(not c.startswith(("interfaces", "lanpower")) for c in lab["SIM-SW-01"].command_log)
-    records = (await admin.get("/api/profiles")).json()["verifications"]
-    assert records[0]["capability"] == "READ" and records[0]["model_family"] == "OS6860"
-    assert records[0]["evidence"]["method"] == "automated read-only verification run"
+    # A simulator run is SIMULATED evidence: it is never recorded as a lab verification.
+    recorded = await admin.post("/api/profiles/verifications/run", json={**body, "record": True})
+    assert recorded.status_code == 422 and "SIMULATED" in recorded.text
+    assert (await admin.get("/api/profiles")).json()["verifications"] == []
+    # An undiscovered switch cannot be used for verification at all.
+    refused = await admin.post("/api/profiles/verifications/run", json={
+        "switch_id": ids["SIM-SW-03"], "port": "1/12"})
+    assert refused.status_code == 400 and refused.json()["error"]["code"] == "DISCOVERY_REQUIRED"
 
 
 async def test_verification_run_fails_on_unexpected_output(admin, lab):

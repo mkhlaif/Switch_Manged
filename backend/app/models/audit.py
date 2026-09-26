@@ -40,6 +40,11 @@ class AuditLog(Base):
     error: Mapped[str] = mapped_column(String(1024), default="", server_default="")
     before_state: Mapped[dict | None] = mapped_column(JSON, nullable=True)
     after_state: Mapped[dict | None] = mapped_column(JSON, nullable=True)
+    site: Mapped[str] = mapped_column(String(128), default="", server_default="")
+    profile_version: Mapped[str] = mapped_column(String(16), default="", server_default="")
+    error_category: Mapped[str] = mapped_column(String(32), default="", server_default="")
+    # Outcome / verification result of a network operation (SUCCESS, VERIFICATION_FAILED, …).
+    outcome: Mapped[str] = mapped_column(String(24), default="", server_default="")
 
 
 from app.db.audit_guard import attach as _append_only  # noqa: E402

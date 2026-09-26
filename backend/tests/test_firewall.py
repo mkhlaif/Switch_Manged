@@ -100,7 +100,7 @@ MODELS = {"AOS8": ("OS6860E-P24", "8.9.221.R03"), "AOS6": ("OS6450-P24", "6.7.2.
 
 
 class Env:
-    def __init__(self, verified: bool = True, **state_kw):
+    def __init__(self, verified: bool = True, level: str = "", **state_kw):
         self.state = state(**state_kw)
         self.recorder = ListRecorder()
         self.breaker = FakeBreaker()
@@ -113,7 +113,8 @@ class Env:
         async def verification(profile_key, capability, model, version):
             self.verification_calls.append((profile_key, capability, model, version))
             return VerificationResult(True, self.verified,
-                                      "verified" if self.verified else "not lab-verified")
+                                      "verified" if self.verified else "not lab-verified",
+                                      level)
 
         self.fw = CommandSafetyFirewall(state_provider=provider, recorder=self.recorder,
                                         verification_provider=verification,
@@ -367,7 +368,7 @@ async def test_discovery_output_is_untrusted_data():
 # --------------------------------------------------------------- restart authorization ---
 async def _auth(env, ctx=ADMIN, classification="ACCESS", device="SW-1", port="1/1/26",
                 trunk_confirmed=False, profile=AOS8_PROFILE, confidence="High",
-                switch_role="access"):
+                switch_role="access", discovery_status="discovered", environment="lab"):
     strategy = next(s for s in profile.strategies if s.strategy.value == "INTERFACE_ADMIN_STATE")
     model, version = MODELS[profile.family]
     return await env.fw.authorize_restart(
@@ -375,7 +376,8 @@ async def _auth(env, ctx=ADMIN, classification="ACCESS", device="SW-1", port="1/
         strategy_spec=strategy, classification=classification, confidence=confidence,
         declared_uplink=False, is_linkagg=False, switch_role=switch_role, model=model,
         version=version, trunk_override_confirmed=trunk_confirmed,
-        operator_classes={"ACCESS", "LIKELY_ACCESS"}, confirmed=True)
+        operator_classes={"ACCESS", "LIKELY_ACCESS"}, confirmed=True,
+        discovery_status=discovery_status, transport="ssh", environment=environment)
 
 
 async def test_restart_budget_down_once_up_twice():
@@ -529,7 +531,8 @@ async def test_unavailable_safety_state_blocks_state_changes():
                                    declared_uplink=False, is_linkagg=False, switch_role="",
                                    model="OS6860E", version="8.9.221.R03",
                                    trunk_override_confirmed=False,
-                                   operator_classes={"ACCESS"}, confirmed=True)
+                                   operator_classes={"ACCESS"}, confirmed=True,
+                                   discovery_status="discovered", environment="lab")
 
 
 async def test_safety_test_report_generates_without_sending():
@@ -620,8 +623,43 @@ async def test_lab_verification_required_on_real_switches():
 
 async def test_restart_strategy_must_be_lab_verified():
     env = Env(verified=False)
-    with pytest.raises(CommandBlocked, match="not lab-verified"):
+    with pytest.raises(CommandBlocked, match="not LAB_VERIFIED"):
         await _auth(env)
+
+
+async def test_unknown_device_gets_no_restart_authorization():
+    env = Env()
+    for status in ("not_discovered", "discovery_failed", "mismatch"):
+        with pytest.raises(CommandBlocked, match="UNKNOWN DEVICE") as exc:
+            await _auth(env, discovery_status=status)
+        assert exc.value.event == "DEVICE_NOT_DISCOVERED"
+    assert env.verification_calls == []  # blocked before anything else was looked at
+
+
+async def test_production_switch_needs_production_verified_strategy():
+    lab_only = Env()  # verified, level not stated = LAB_VERIFIED at most
+    with pytest.raises(CommandBlocked, match="not PRODUCTION_VERIFIED") as exc:
+        await _auth(lab_only, environment="production")
+    assert exc.value.event == "STRATEGY_NOT_VERIFIED"
+    assert (await _auth(lab_only, environment="lab")).classification == "ACCESS"
+    production = Env(level="PRODUCTION_VERIFIED")
+    assert (await _auth(production, environment="production")).classification == "ACCESS"
+    # A BLOCKED / unverified record never counts, whatever level it names.
+    blocked = Env(verified=False, level="BLOCKED")
+    with pytest.raises(CommandBlocked):
+        await _auth(blocked, environment="lab")
+
+
+async def test_new_structural_categories_are_never_restartable():
+    env = Env(mode="EMERGENCY")
+    for category in ("UPLINK", "LAG", "MANAGEMENT", "STACK", "UNKNOWN"):
+        with pytest.raises(CommandBlocked, match="BLOCKED"):
+            await _auth(env, classification=category, trunk_confirmed=True)
+    # CORE / DISTRIBUTION: like trunks, only the administrator override in EMERGENCY mode.
+    with pytest.raises(CommandBlocked):
+        await _auth(Env(), classification="CORE")
+    auth = await _auth(env, classification="DISTRIBUTION", trunk_confirmed=True)
+    assert auth.trunk_override
 
 
 # ------------------------------------------------------------------- session limits ---

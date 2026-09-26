@@ -28,6 +28,7 @@ class SwitchResultStatus(str, enum.Enum):
     CONNECTION_FAILED = "connection_failed"
     COMMAND_FAILED = "command_failed"
     UNSUPPORTED = "unsupported"
+    DISCOVERY_FAILED = "discovery_failed"
     BLOCKED = "blocked"
     UNEXPECTED_OUTPUT = "unexpected_output"
     ERROR = "error"
@@ -41,6 +42,7 @@ FAILURE_STATUSES = {
     SwitchResultStatus.CONNECTION_FAILED.value,
     SwitchResultStatus.COMMAND_FAILED.value,
     SwitchResultStatus.UNSUPPORTED.value,
+    SwitchResultStatus.DISCOVERY_FAILED.value,
     SwitchResultStatus.ERROR.value,
 }
 

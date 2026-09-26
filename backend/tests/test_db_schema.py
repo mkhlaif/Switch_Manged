@@ -120,10 +120,15 @@ def test_expected_constraints_and_indexes_exist(tmp_path):
     assert sql["ix_switches_name"] == "CREATE UNIQUE INDEX ix_switches_name ON switches (name)"
     checks = {c["name"] for c in insp.get_check_constraints("switches")}
     assert {"ck_switches_ssh_port_range", "ck_switches_role_valid",
-            "ck_switches_transport_valid"} <= checks
+            "ck_switches_transport_valid", "ck_switches_discovery_status_valid",
+            "ck_switches_environment_valid"} <= checks
     assert {"ck_import_jobs_status_valid", "ck_import_jobs_format_valid",
-            "ck_import_jobs_on_existing_valid"} <= {
+            "ck_import_jobs_on_existing_valid", "ck_import_jobs_mode_valid"} <= {
         c["name"] for c in insp.get_check_constraints("import_jobs")}
+    assert "ck_discovery_jobs_status_valid" in {
+        c["name"] for c in insp.get_check_constraints("discovery_jobs")}
+    assert "ck_command_verifications_status_valid" in {
+        c["name"] for c in insp.get_check_constraints("command_verifications")}
     fks = insp.get_foreign_keys("import_jobs")
     assert fks and fks[0]["referred_table"] == "users" and \
         fks[0]["options"].get("ondelete") == "SET NULL"
@@ -132,3 +137,67 @@ def test_expected_constraints_and_indexes_exist(tmp_path):
     assert {"ix_audit_logs_ts", "ix_audit_logs_action"} <= {
         i["name"] for i in insp.get_indexes("audit_logs")}
     assert "ix_import_jobs_status" in {i["name"] for i in insp.get_indexes("import_jobs")}
+
+
+def _insert(con: sqlite3.Connection, table: str, **values) -> None:
+    """Insert a row, filling every other NOT NULL column without a default with a neutral
+    value (the tests only care about the columns they name)."""
+    for _cid, name, ctype, notnull, default, pk in con.execute(f"PRAGMA table_info({table})"):
+        if name in values or pk or not notnull or default is not None:
+            continue
+        kind = (ctype or "").upper()
+        values[name] = 0 if any(k in kind for k in ("INT", "BOOL")) else (
+            "{}" if "JSON" in kind else "2026-01-01" if "DATE" in kind or "TIME" in kind else "")
+    cols = ", ".join(values)
+    marks = ", ".join("?" for _ in values)
+    con.execute(f"INSERT INTO {table} ({cols}) VALUES ({marks})", list(values.values()))
+
+
+def test_0005_moves_typed_identity_to_expected_metadata(tmp_path):
+    db = tmp_path / "m5.db"
+    assert alembic(db, "upgrade", "0004").returncode == 0
+    con = sqlite3.connect(db)
+    _insert(con, "switches", id=1, name="SW1", host="10.0.0.1", ssh_port=22, model="OS6360",
+            aos_version="8.10R1", transport="ssh", role="access", uplink_ports="[]",
+            port_locations="{}")
+    _insert(con, "command_verifications", profile_key="AOS8", capability="READ",
+            model_family="OS6360", version_prefix="8.10", verified_by="admin",
+            evidence="{}", verified_at="2026-01-01")
+    _insert(con, "audit_logs", username="admin", action="LOGIN_SUCCESS", result="SUCCESS",
+            details="{}", ts="2026-01-01")
+    con.commit()
+    con.close()
+
+    result = alembic(db, "upgrade", "head")
+    assert result.returncode == 0, result.stderr
+    con = sqlite3.connect(db)
+    row = con.execute("SELECT model, aos_version, expected_model, expected_aos_version, "
+                      "discovery_status, environment FROM switches").fetchone()
+    # Typed values are never trusted as the identity: they become expected metadata.
+    assert row == ("", "", "OS6360", "8.10R1", "not_discovered", "production")
+    assert con.execute("SELECT status FROM command_verifications").fetchone() == \
+        ("LAB_VERIFIED",)
+    # The audit log stays append-only after the migration.
+    try:
+        con.execute("UPDATE audit_logs SET message = 'tampered'")
+        raise AssertionError("audit log update was allowed")
+    except sqlite3.DatabaseError as exc:
+        assert "append-only" in str(exc)
+    for bad in ("UPDATE switches SET discovery_status = 'guessed'",
+                "UPDATE switches SET environment = 'staging'",
+                "UPDATE command_verifications SET status = 'DRAFT'"):
+        try:
+            con.execute(bad)
+            raise AssertionError(f"accepted: {bad}")
+        except sqlite3.IntegrityError:
+            pass
+    assert con.execute("PRAGMA foreign_key_check").fetchall() == []
+    con.close()
+
+    # N → N-1 restores what the administrator had typed; N-1 → N again works.
+    assert alembic(db, "downgrade", "0004").returncode == 0
+    con = sqlite3.connect(db)
+    assert con.execute("SELECT model, aos_version FROM switches").fetchone() == \
+        ("OS6360", "8.10R1")
+    con.close()
+    assert alembic(db, "upgrade", "head").returncode == 0

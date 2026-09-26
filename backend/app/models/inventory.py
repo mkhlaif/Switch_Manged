@@ -53,6 +53,17 @@ class Transport(str, enum.Enum):
 SWITCH_ROLES = ("access", "distribution", "core", "unknown")
 
 
+class DiscoveryStatus(str, enum.Enum):
+    NOT_DISCOVERED = "not_discovered"    # never identified (or legacy manual data)
+    DISCOVERED = "discovered"            # vendor/model/AOS read from the device
+    DISCOVERY_FAILED = "discovery_failed"  # could not be identified safely
+    MISMATCH = "mismatch"                # device differs from expected/previous identity
+
+
+DISCOVERY_STATUSES = tuple(s.value for s in DiscoveryStatus)
+ENVIRONMENTS = ("production", "lab")
+
+
 class Switch(Base):
     __tablename__ = "switches"
     __table_args__ = (
@@ -68,6 +79,9 @@ class Switch(Base):
         CheckConstraint("role IN ('access', 'distribution', 'core', 'unknown')",
                         name="role_valid"),
         CheckConstraint("transport IN ('ssh', 'simulator')", name="transport_valid"),
+        CheckConstraint("discovery_status IN ('not_discovered', 'discovered', "
+                        "'discovery_failed', 'mismatch')", name="discovery_status_valid"),
+        CheckConstraint("environment IN ('production', 'lab')", name="environment_valid"),
     )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
@@ -76,8 +90,30 @@ class Switch(Base):
     # DNS host name of the switch (optional, informational; unique when set).
     hostname: Mapped[str] = mapped_column(String(255), default="", server_default="")
     ssh_port: Mapped[int] = mapped_column(Integer, default=22)
+    # Identity READ FROM THE DEVICE by discovery (services/discovery); never entered by hand.
+    vendor: Mapped[str] = mapped_column(String(16), default="", server_default="")
     model: Mapped[str] = mapped_column(String(64), default="")
     aos_version: Mapped[str] = mapped_column(String(64), default="")
+    discovery_status: Mapped[str] = mapped_column(
+        String(20), default=DiscoveryStatus.NOT_DISCOVERED.value,
+        server_default=DiscoveryStatus.NOT_DISCOVERED.value)
+    discovery_error: Mapped[str] = mapped_column(String(255), default="", server_default="")
+    discovery_category: Mapped[str] = mapped_column(String(32), default="", server_default="")
+    discovery_profile: Mapped[str] = mapped_column(String(32), default="", server_default="")
+    discovered_at: Mapped[datetime | None] = mapped_column(UTCDateTime, nullable=True)
+    system_name: Mapped[str] = mapped_column(String(128), default="", server_default="")
+    system_description: Mapped[str] = mapped_column(String(255), default="", server_default="")
+    system_object_id: Mapped[str] = mapped_column(String(64), default="", server_default="")
+    # Administrator metadata (import / form): compared with discovery, never trusted as identity.
+    expected_model: Mapped[str] = mapped_column(String(64), default="", server_default="")
+    expected_aos_version: Mapped[str] = mapped_column(String(64), default="", server_default="")
+    # SHA-256 fingerprint supplied out of band (e.g. in an import file): when the switch
+    # presents exactly this key it is trusted automatically; anything else is refused.
+    expected_host_key_fingerprint: Mapped[str] = mapped_column(String(128), default="",
+                                                               server_default="")
+    # production: restarts need PRODUCTION_VERIFIED strategies; lab: LAB_VERIFIED suffices.
+    environment: Mapped[str] = mapped_column(String(12), default="production",
+                                             server_default="production")
     site: Mapped[str] = mapped_column(String(128), default="", server_default="")
     location: Mapped[str] = mapped_column(String(128), default="")
     description: Mapped[str] = mapped_column(String(255), default="")

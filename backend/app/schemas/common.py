@@ -4,7 +4,7 @@ import re
 from datetime import datetime
 from typing import Any
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, computed_field, field_validator
 
 from app.core import inventory_fields as fields
 from app.models import Role
@@ -117,8 +117,12 @@ class SwitchBase(Strict):
     host: str = Field(pattern=_HOST_PATTERN)
     hostname: str = Field(default="", max_length=253)
     ssh_port: int = Field(default=22, ge=1, le=65535)
-    model: str = Field(default="", max_length=64)
-    aos_version: str = Field(default="", max_length=64)
+    # Model and AOS version are DISCOVERED, never entered. What an administrator expects may be
+    # recorded as metadata; discovery compares it (mismatch blocks state changes).
+    expected_model: str = Field(default="", max_length=64)
+    expected_aos_version: str = Field(default="", max_length=64)
+    expected_host_key_fingerprint: str = Field(default="", max_length=128)
+    environment: str = Field(default="production", pattern=r"^(production|lab)$")
     site: str = Field(default="", max_length=128)
     location: str = Field(default="", max_length=128)
     description: str = Field(default="", max_length=255)
@@ -135,6 +139,21 @@ class SwitchBase(Strict):
     @classmethod
     def _ports(cls, value: list[str]) -> list[str]:
         return _clean_ports(value)
+
+    @field_validator("expected_model")
+    @classmethod
+    def _expected_model(cls, value: str) -> str:
+        return fields.expected_model(value)
+
+    @field_validator("expected_aos_version")
+    @classmethod
+    def _expected_version(cls, value: str) -> str:
+        return fields.expected_aos_version(value)
+
+    @field_validator("expected_host_key_fingerprint")
+    @classmethod
+    def _fingerprint(cls, value: str) -> str:
+        return fields.host_key_fingerprint(value)
 
     @field_validator("hostname")
     @classmethod
@@ -166,8 +185,10 @@ class SwitchUpdate(Strict):
     host: str | None = Field(default=None, pattern=_HOST_PATTERN)
     hostname: str | None = Field(default=None, max_length=253)
     ssh_port: int | None = Field(default=None, ge=1, le=65535)
-    model: str | None = Field(default=None, max_length=64)
-    aos_version: str | None = Field(default=None, max_length=64)
+    expected_model: str | None = Field(default=None, max_length=64)
+    expected_aos_version: str | None = Field(default=None, max_length=64)
+    expected_host_key_fingerprint: str | None = Field(default=None, max_length=128)
+    environment: str | None = Field(default=None, pattern=r"^(production|lab)$")
     site: str | None = Field(default=None, max_length=128)
     location: str | None = Field(default=None, max_length=128)
     description: str | None = Field(default=None, max_length=255)
@@ -184,6 +205,21 @@ class SwitchUpdate(Strict):
     @classmethod
     def _ports(cls, value: list[str] | None) -> list[str] | None:
         return None if value is None else _clean_ports(value)
+
+    @field_validator("expected_model")
+    @classmethod
+    def _expected_model(cls, value: str | None) -> str | None:
+        return None if value is None else fields.expected_model(value)
+
+    @field_validator("expected_aos_version")
+    @classmethod
+    def _expected_version(cls, value: str | None) -> str | None:
+        return None if value is None else fields.expected_aos_version(value)
+
+    @field_validator("expected_host_key_fingerprint")
+    @classmethod
+    def _fingerprint(cls, value: str | None) -> str | None:
+        return None if value is None else fields.host_key_fingerprint(value)
 
     @field_validator("hostname")
     @classmethod
@@ -212,8 +248,21 @@ class SwitchOut(ORM):
     host: str
     hostname: str = ""
     ssh_port: int
+    # Discovered identity (read-only; from automatic discovery only).
+    vendor: str = ""
     model: str
     aos_version: str
+    discovery_status: str = "not_discovered"
+    discovery_error: str = ""
+    discovery_category: str = ""
+    discovery_profile: str = ""
+    discovered_at: datetime | None = None
+    system_name: str = ""
+    system_object_id: str = ""
+    expected_model: str = ""
+    expected_aos_version: str = ""
+    expected_host_key_fingerprint: str = ""
+    environment: str = "production"
     site: str = ""
     location: str
     description: str
@@ -250,6 +299,8 @@ class ImportUpload(Strict):
 class ImportConfirm(Strict):
     on_existing: str = Field(default="skip", pattern=r"^(skip|update)$")
     skip_invalid: bool = False
+    # atomic (default): all rows or none. per_row: explicit opt-in, invalid rows skipped.
+    mode: str = Field(default="atomic", pattern=r"^(atomic|per_row)$")
 
 
 class TrustHostKeyRequest(Strict):
@@ -317,6 +368,14 @@ class MacSearchResultOut(ORM):
     duration_ms: int | None
     created_at: datetime
 
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def category(self) -> str:
+        """Safe error category of this switch's result ("" when found / not found)."""
+        from app.core.error_categories import category_for_status
+
+        return category_for_status(self.status)
+
 
 # ---------------------------------------------------------------- port actions -------------
 class PrepareRestartRequest(Strict):
@@ -369,6 +428,11 @@ class PortActionOut(ORM):
     reason: str
     result_message: str
     error_message: str
+    # SUCCESS | VERIFICATION_FAILED | FAILED | UNKNOWN | BLOCKED, the safe error category and
+    # the content hash of the command profile that was used.
+    outcome: str | None = None
+    error_category: str | None = None
+    profile_version: str | None = None
     requested_by: str
     search_id: str | None
     created_at: datetime
@@ -417,9 +481,17 @@ class VerificationCreate(Strict):
 
     profile_key: str = Field(max_length=32)
     capability: str = Field(pattern=r"^[A-Z0-9_]{3,32}$")
-    model_family: str = Field(pattern=r"^(\*|OS\d{2,5}K?[A-Z]?)$")
-    version_prefix: str = Field(pattern=r"^\d{1,2}(\.\d{1,3}){0,3}$")
+    # An exact model family and at least major.minor: nobody verifies "every model" or "8.x".
+    model_family: str = Field(pattern=r"^OS\d{2,5}K?[A-Z]?$")
+    version_prefix: str = Field(pattern=r"^\d{1,2}\.\d{1,3}(\.\d{1,3}){0,2}$")
     notes: str = Field(default="", max_length=1000)
+
+
+class VerificationStatusChange(Strict):
+    """Profile state transition of a verification record (audited, reason mandatory)."""
+
+    status: str = Field(pattern=r"^(LAB_VERIFIED|PRODUCTION_VERIFIED|BLOCKED|DEPRECATED)$")
+    reason: str = Field(min_length=3, max_length=300)
 
 
 class VerificationRun(Strict):
@@ -483,3 +555,14 @@ class OperationRequest(Strict):
     confirmations: list[str] = Field(default_factory=list, max_length=4)
     reason: str = Field(default="", max_length=500)
     mode: str = Field(default="STANDARD", pattern=r"^(FAST|STANDARD|DEEP)$")
+
+
+class DiscoveryJobCreate(Strict):
+    """Discover the given switches (or every enabled switch) in the background."""
+
+    switch_ids: list[int] = Field(default_factory=list, max_length=5000)
+    all_enabled: bool = False
+
+
+class DiscoveryAccept(Strict):
+    reason: str = Field(min_length=3, max_length=300)

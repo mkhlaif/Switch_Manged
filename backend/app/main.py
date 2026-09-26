@@ -18,6 +18,7 @@ from app.api.routes import (
     auth,
     credentials,
     dashboard,
+    discovery,
     history,
     integrations,
     mac,
@@ -44,6 +45,7 @@ from app.security.firewall import get_firewall, init_firewall
 from app.security.recorder import get_recorder
 from app.security.request_guard import BodySizeLimit, CommandFieldGuard
 from app.services.alcatel.registry import sync_builtin_profiles
+from app.services.discovery.service import mark_interrupted_jobs
 from app.services.inventory.bulk import mark_interrupted_imports
 from app.services.mac_search.service import mark_interrupted_searches
 from app.services.port_control.service import mark_interrupted_actions
@@ -96,9 +98,11 @@ async def lifespan(app: FastAPI):
         n_searches = await mark_interrupted_searches(db)
         n_actions = await mark_interrupted_actions(db)
         n_imports = await mark_interrupted_imports(db)
-        if n_searches or n_actions or n_imports:
-            log.warning("Marked %d search(es), %d port action(s) and %d import(s) as "
-                        "interrupted", n_searches, n_actions, n_imports)
+        n_discoveries = await mark_interrupted_jobs(db)
+        if n_searches or n_actions or n_imports or n_discoveries:
+            log.warning("Marked %d search(es), %d port action(s), %d import(s) and %d "
+                        "discovery job(s) as interrupted", n_searches, n_actions, n_imports,
+                        n_discoveries)
     await _bootstrap_admin()
     if s.ssh_allow_unknown_host_keys:
         log_security(log, "SSH_ALLOW_UNKNOWN_HOST_KEYS is ON: host-key verification is disabled "
@@ -112,6 +116,9 @@ async def lifespan(app: FastAPI):
     await breaker.flush()
     await get_recorder().stop()
     await dispose_engine()
+
+
+SIMPLE_GENERIC = "Something went wrong. Please try again or contact IT support."
 
 
 def _error(status: int, code: str, title: str, message: str, **extra) -> JSONResponse:
@@ -149,12 +156,28 @@ def create_app() -> FastAPI:
                                         "max-age=31536000; includeSubDomains")
         return response
 
+    # The simplified MAC_OPERATOR API never returns technical text: not even field names,
+    # validation details or error categories (§37). Sign-in / permission / rate-limit messages
+    # are plain sentences and are kept.
+    simple_safe_codes = {"NOT_AUTHENTICATED", "UNAUTHORIZED", "PERMISSION_DENIED", "FORBIDDEN",
+                         "CSRF_FAILED", "RATE_LIMITED"}
+
+    def simple_path(request: Request) -> bool:
+        return request.url.path.startswith("/api/simple")
+
     @app.exception_handler(AppError)
-    async def app_error(_: Request, exc: AppError):
+    async def app_error(request: Request, exc: AppError):
+        if simple_path(request):
+            message = exc.message if exc.code in simple_safe_codes else SIMPLE_GENERIC
+            return _error(exc.status_code, exc.code if exc.code in simple_safe_codes
+                          else "REQUEST_FAILED", "Request failed", message)
         return JSONResponse(status_code=exc.status_code, content=exc.to_dict())
 
     @app.exception_handler(RequestValidationError)
-    async def validation_error(_: Request, exc: RequestValidationError):
+    async def validation_error(request: Request, exc: RequestValidationError):
+        if simple_path(request):
+            return _error(422, "INVALID_INPUT", "Invalid input",
+                          "Please check your input and try again.")
         problems = []
         for err in exc.errors():
             loc = ".".join(str(p) for p in err.get("loc", ()) if p not in ("body", "query", "path"))
@@ -162,7 +185,9 @@ def create_app() -> FastAPI:
         return _error(422, "VALIDATION_FAILED", "Invalid input", "; ".join(problems))
 
     @app.exception_handler(StarletteHTTPException)
-    async def http_error(_: Request, exc: StarletteHTTPException):
+    async def http_error(request: Request, exc: StarletteHTTPException):
+        if simple_path(request):
+            return _error(exc.status_code, "REQUEST_FAILED", "Request failed", SIMPLE_GENERIC)
         return _error(exc.status_code, "HTTP_ERROR", "Request failed", str(exc.detail))
 
     @app.exception_handler(Exception)
@@ -197,9 +222,9 @@ def create_app() -> FastAPI:
                 "running_tasks": len(tasks.running())}
 
     # switch_transfer before switches: /api/switches/import must not match /{switch_id}.
-    for module in (auth, users, credentials, switch_transfer, switches, mac, history, ports,
-                   audit, settings, profiles, dashboard, operations, safety, alerts,
-                   integrations, simple, topology):
+    for module in (auth, users, credentials, switch_transfer, switches, discovery, mac,
+                   history, ports, audit, settings, profiles, dashboard, operations, safety,
+                   alerts, integrations, simple, topology):
         app.include_router(module.router)
     return app
 

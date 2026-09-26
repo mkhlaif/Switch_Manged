@@ -8,9 +8,9 @@ SAFE MODE (security/state.py). This module decides, per port, whether a restart 
 | ACCESS (High confidence, access switch, every endpoint check passes) | yes (simple confirmation, no approval) | "RESTART PORT <port>" | "RESTART PORT <port>" |
 | ACCESS (Medium confidence / switch role not "access") | NO     | phrase         | phrase                       |
 | LIKELY_ACCESS                                   | NO           | phrase + warning | phrase + warning          |
-| UNKNOWN (uncertain classification)              | NO           | NO             | NO (fail closed)             |
-| TRUNK / LIKELY_TRUNK, core/distribution switch  | NO           | NO             | EMERGENCY mode only: HIGH RISK + 2 phrases |
-| declared uplink / link aggregate                | NO           | NO             | NO (hard block)              |
+| UNKNOWN (uncertain / Low-confidence classification) | NO       | NO             | NO (fail closed)             |
+| TRUNK / LIKELY_TRUNK, CORE / DISTRIBUTION       | NO           | NO             | EMERGENCY mode only: HIGH RISK + 2 phrases |
+| UPLINK (declared) / LAG / MANAGEMENT / STACK    | NO           | NO             | NO (hard block)              |
 
 The MAC_OPERATOR needs no human approval; instead every restart must pass
 :func:`endpoint_evidence_problems` (independent evidence that the port is a single endpoint
@@ -32,6 +32,17 @@ INFRASTRUCTURE_ROLES = {"core", "distribution"}
 
 BLOCKED_TRUNK = ("PORT RESTART BLOCKED. This port appears to be a trunk/uplink. "
                  "No command was executed.")
+
+
+_HARD_BLOCKED = {
+    PortClass.UPLINK: "declared uplink",
+    PortClass.LAG: "link aggregate",
+    PortClass.MANAGEMENT: "management connection",
+    PortClass.STACK: "stacking link",
+}
+# Categories this policy knows how to handle; anything else fails closed.
+_KNOWN = {PortClass.ACCESS, PortClass.LIKELY_ACCESS, PortClass.LIKELY_TRUNK, PortClass.TRUNK,
+          PortClass.CORE, PortClass.DISTRIBUTION}
 
 
 def restart_phrase(port: str) -> str:
@@ -87,13 +98,23 @@ def evaluate_restart_policy(
         return blocked("PORT RESTART BLOCKED. The port classification is uncertain (UNKNOWN); a "
                        "state-changing command is never sent to a port that cannot be "
                        "classified. No command was executed.")
+    if category in _HARD_BLOCKED:
+        return blocked(f"PORT RESTART BLOCKED. The port is classified as {category.value} "
+                       f"({_HARD_BLOCKED[category]}); it can never be restarted. No command was "
+                       "executed.")
+    if category not in _KNOWN:
+        return blocked("PORT RESTART BLOCKED. Unrecognized port classification. No command was "
+                       "executed.")
 
     warnings: list[str] = ["This operation will temporarily disconnect the device."]
     if mac_count and mac_count > 1:
         warnings.append(f"{mac_count} MAC addresses are learned on this port; all of those "
                         "devices will be disconnected.")
     phrase = restart_phrase(port)
-    infrastructure = (switch_role or "").lower() in INFRASTRUCTURE_ROLES
+    infrastructure = ((switch_role or "").lower() in INFRASTRUCTURE_ROLES
+                      or category in (PortClass.CORE, PortClass.DISTRIBUTION))
+    if category in (PortClass.CORE, PortClass.DISTRIBUTION) and not switch_role:
+        switch_role = category.value.lower()
     trunkish = category in (PortClass.LIKELY_TRUNK, PortClass.TRUNK)
 
     if trunkish or infrastructure:

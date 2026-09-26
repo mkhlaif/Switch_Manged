@@ -67,6 +67,7 @@ class SimBehavior:
     command_delay: float = 0.0
     relearn_delay: float = 2.0
     banner: str = ""
+    system_output: str = ""                 # replaces the "show system" answer (other vendor)
 
 
 @dataclass

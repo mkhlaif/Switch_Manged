@@ -23,6 +23,7 @@ from app.services.alcatel.adapter import AlcatelAdapter
 from app.services.alcatel.investigation import investigate
 from app.services.alcatel.registry import load_profiles, select_profile
 from app.services.audit.service import record
+from app.services.discovery.service import IDENTIFIED
 from app.services.inventory import service as inventory
 from app.services.ssh.errors import SwitchError
 from app.services.ssh.manager import get_connector
@@ -61,7 +62,9 @@ async def query_port(db: AsyncSession, user: User, *, switch_id: object, port: o
     if profile is None:
         raise AppError(f"{reason} Model: {sw.model or 'unknown'}, AOS: "
                        f"{sw.aos_version or 'unknown'}. No command was executed.",
-                       title="COMMAND PROFILE UNAVAILABLE", code="NO_PROFILE")
+                       title="COMMAND PROFILE UNAVAILABLE",
+                       code="NO_PROFILE" if sw.discovery_status in IDENTIFIED
+                       else "DISCOVERY_REQUIRED")
     try:
         canonical_port = PortValidator.validate(port, profile.family)
         normalized = MacAddressValidator.validate(mac) if mac else None

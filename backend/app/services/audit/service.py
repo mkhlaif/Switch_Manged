@@ -74,6 +74,10 @@ async def record(
     error: str = "",
     before_state: dict | None = None,
     after_state: dict | None = None,
+    site: str = "",
+    profile_version: str = "",
+    error_category: str = "",
+    outcome: str = "",
 ) -> AuditLog:
     entry = AuditLog(
         user_id=getattr(user, "id", None),
@@ -100,6 +104,10 @@ async def record(
         error=error[:1024],
         before_state=_bounded(scrub(before_state)) if before_state is not None else None,
         after_state=_bounded(scrub(after_state)) if after_state is not None else None,
+        site=(site or "")[:128],
+        profile_version=(profile_version or "")[:16],
+        error_category=(error_category or "")[:32],
+        outcome=(outcome or "")[:24],
     )
     db.add(entry)
     if commit:

@@ -92,7 +92,8 @@ async def confirm_import(job_id: str, body: ImportConfirm, request: Request,
                          user: User = Depends(require(Permission.IMPORT_SWITCHES)),
                          db: AsyncSession = Depends(get_db)) -> dict:
     job = await bulk.confirm_import(db, user, job_id, on_existing=body.on_existing,
-                                    skip_invalid=body.skip_invalid, ip=client_ip(request))
+                                    skip_invalid=body.skip_invalid, ip=client_ip(request),
+                                    mode=body.mode)
     if job.status == ImportStatus.QUEUED.value:
         spawn(bulk.run_import(job.id), name=f"switch-import-{job.id}")
     return bulk.job_view(job, include_rows=False)

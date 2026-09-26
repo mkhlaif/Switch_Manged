@@ -53,7 +53,7 @@ async def test_access_port_prepare_rechecks_and_defaults_to_dry_run(operator, la
     assert plan["commands"] == ["interfaces port 1/1/26 admin-state disable",
                                 "interfaces port 1/1/26 admin-state enable"]
     assert plan["dry_run"] is True and plan["execution_allowed"] is False  # not verified yet
-    assert "not lab-verified" in plan["execution_note"]
+    assert "not verified (DRAFT)" in plan["execution_note"]
     assert plan["steps"][0]["step"] == "recheck" and plan["steps"][0]["ok"]
     assert writes(lab, "SIM-SW-01") == []
 
@@ -258,6 +258,24 @@ async def test_state_change_after_confirmation_aborts(admin, lab, maintenance):
     assert "Network state changed since confirmation. Operation cancelled for safety." in \
         done["result_message"]
     assert writes(lab, "SIM-SW-01") == []
+
+
+async def test_identity_change_after_confirmation_aborts(admin, lab, maintenance):
+    """The device is re-identified in the execution session itself, before the down command:
+    a switch upgraded (or swapped) between confirmation and execution is never touched."""
+    ids = await seed_lab_switches(["SIM-SW-01"])
+    await approve("AOS8", "INTERFACE_ADMIN_STATE", "8.9")
+    await disable_dry_run(admin)
+    plan = (await prepare(admin, ids["SIM-SW-01"], "1/1/26", MAC_ACCESS)).json()
+    assert plan["execution_allowed"]
+    lab["SIM-SW-01"].version = "8.9.221.R04"
+    lab["SIM-SW-01"].command_log.clear()
+    done = await wait_for_action(admin, (await execute(admin, plan)).json()["id"])
+    assert done["status"] == "aborted" and "identity changed" in done["result_message"]
+    assert done["outcome"] == "BLOCKED" and done["error_category"] == "SAFETY_CHECK_FAILED"
+    assert lab["SIM-SW-01"].command_log == ["show system"]  # nothing else was sent
+    sw = (await admin.get(f"/api/switches/{ids['SIM-SW-01']}")).json()
+    assert sw["discovery_status"] == "mismatch"
 
 
 async def test_change_report_and_structured_audit(admin, operator, lab, maintenance):

@@ -189,9 +189,14 @@ async def seed_lab_switches(names: list[str] | None = None, *, unknown_version: 
         for key, sim in lab_switches.items():
             if names and sim.name not in names:
                 continue
+            # Seeded as already discovered (what a discovery run stores), except the switches
+            # listed in unknown_version, which are left for automatic discovery.
+            unknown = sim.name in unknown_version
             sw = Switch(name=sim.name, host=sim.name, transport="simulator",
-                        model="" if sim.name in unknown_version else sim.model,
-                        aos_version="" if sim.name in unknown_version else sim.version,
+                        model="" if unknown else sim.model,
+                        aos_version="" if unknown else sim.version,
+                        vendor="" if unknown else "ALE",
+                        discovery_status="not_discovered" if unknown else "discovered",
                         location=sim.location, credential_id=cred.id,
                         uplink_ports=(uplinks or {}).get(sim.name, []),
                         role=(roles or {}).get(sim.name, "unknown"))

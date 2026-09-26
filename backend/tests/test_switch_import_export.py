@@ -39,9 +39,10 @@ async def validate(api, content: str, fmt: str = "csv", filename: str = "switche
 
 
 async def run_to_end(api, job_id: str, *, on_existing: str = "skip",
-                     skip_invalid: bool = False) -> dict:
+                     skip_invalid: bool = False, mode: str = "atomic") -> dict:
     resp = await api.post(f"/api/switches/import/{job_id}/confirm",
-                          json={"on_existing": on_existing, "skip_invalid": skip_invalid})
+                          json={"on_existing": on_existing, "skip_invalid": skip_invalid,
+                                "mode": mode})
     assert resp.status_code == 200, resp.text
     for _ in range(600):
         job = (await api.get(f"/api/switches/import/{job_id}")).json()
@@ -70,14 +71,19 @@ async def test_csv_import_preview_confirm_and_idempotency(admin):
     assert preview["new"] == 2
     assert await switch_count() == 0  # nothing is written before confirmation
 
+    # model / aos_version columns are EXPECTED metadata; the fingerprint is missing.
+    assert any("ssh_host_key_fingerprint" in w for w in row(preview, 2)["warnings"])
     job = await run_to_end(admin, preview["id"])
-    assert job["status"] == "completed"
+    assert job["status"] == "completed" and job["mode"] == "atomic"
     assert (job["imported"], job["updated"], job["unchanged"], job["failed"]) == (2, 0, 0, 0)
+    assert job["discovery_job_id"] is None  # no trusted / expected host key: nothing to reach
     async with session_factory()() as db:
         sw = (await db.execute(select(Switch).where(Switch.name == "R-BY-NET-SW-1"))).scalar_one()
-        assert (sw.host, sw.hostname, sw.model, sw.aos_version, sw.site, sw.role, sw.ssh_port,
-                sw.enabled, sw.transport) == ("172.17.2.10", "sw01", "OS6360", "8.10R1", "Main",
-                                              "access", 22, True, "ssh")
+        assert (sw.host, sw.hostname, sw.expected_model, sw.expected_aos_version, sw.site,
+                sw.role, sw.ssh_port, sw.enabled, sw.transport) == (
+            "172.17.2.10", "sw01", "OS6360", "8.10R1", "Main", "access", 22, True, "ssh")
+        # The identity is never taken from the file.
+        assert (sw.model, sw.aos_version, sw.discovery_status) == ("", "", "not_discovered")
         assert sw.credential_id is not None and sw.host_key == ""
         audit = (await db.execute(select(AuditLog).where(
             AuditLog.action == "SWITCH_IMPORT"))).scalars().all()
@@ -119,10 +125,7 @@ BAD_ROWS = [
     ("R-1,,999.1.1.1,OS6360,8.10R1,Main,access,22,true,switch-ro", "not a valid IPv4/IPv6"),
     ("R-1,,10.0.0.1,OS6360,8.10R1,Main,access,70000,true,switch-ro", "outside 1-65535"),
     ("R-1,,10.0.0.1,OS6360,8.10R1,Main,access,ssh,true,switch-ro", "not a number"),
-    ("R-1,,10.0.0.1,OS1234,8.10R1,Main,access,22,true,switch-ro", "Unsupported model"),
-    ("R-1,,10.0.0.1,OS6450,8.10R1,Main,access,22,true,switch-ro", "Unsupported model/AOS"),
-    ("R-1,,10.0.0.1,OS6900,7.3.4.R02,Main,access,22,true,switch-ro", "Unsupported model/AOS"),
-    ("R-1,,10.0.0.1,,8.10R1,Main,access,22,true,switch-ro", "model is required"),
+    ("R-1,,10.0.0.1,OS-6360,8.10R1,Main,access,22,true,switch-ro", "not an OmniSwitch model"),
     (",,10.0.0.1,OS6360,8.10R1,Main,access,22,true,switch-ro", "name is required"),
     ("R-1,,10.0.0.1,OS6360,8.10R1,Main,router,22,true,switch-ro", "role 'router'"),
     ("R-1,,10.0.0.1,OS6360,8.10R1,Main,access,22,maybe,switch-ro", "must be true or false"),
@@ -138,6 +141,22 @@ BAD_ROWS = [
     ("R-1,,0.0.0.0,OS6360,8.10R1,Main,access,22,true,switch-ro", "cannot be a switch address"),
     ("R-1,,10.0.0.1,OS6360,8.10R1;reload,Main,access,22,true,switch-ro", "not an AOS version"),
 ]
+
+
+@pytest.mark.parametrize("line,expected", [
+    ("R-1,,10.0.0.1,OS1234,8.10R1,Main,access,22,true,switch-ro", "No command profile covers"),
+    ("R-1,,10.0.0.1,OS6450,8.10R1,Main,access,22,true,switch-ro", "No command profile covers"),
+    ("R-1,,10.0.0.1,OS6900,7.3.4.R02,Main,access,22,true,switch-ro", "No command profile"),
+])
+async def test_expected_metadata_is_checked_but_never_trusted(admin, line, expected):
+    """Unknown / unsupported expected metadata is a warning (discovery decides), not an error."""
+    await make_credential()
+    job = (await validate(admin, HEADER + line + "\n")).json()
+    assert job["valid"] == 1 and any(expected in w for w in row(job, 2)["warnings"]), job
+    # No model / version at all is fine: discovery identifies the switch.
+    job = (await validate(admin, "name,management_ip,credential_reference\n"
+                                 "SW-A,10.0.0.9,switch-ro\n")).json()
+    assert job["valid"] == 1 and not any("profile" in w for w in row(job, 2)["warnings"])
 
 
 @pytest.mark.parametrize("line,expected", BAD_ROWS)
@@ -187,7 +206,11 @@ async def test_duplicates_within_the_file(admin):
      "secret-like column"),
     ("name,management_ip,model,aos_version,command\nSW,10.0.0.1,OS6360,8.10R1,reload\n",
      "Unexpected column"),
-    ("name,management_ip,model\nSW,10.0.0.1,OS6360\n", "Missing required column"),
+    ("name,model\nSW,OS6360\n", "Missing required column"),
+    ("name,management_ip,model,expected_model\nSW,10.0.0.1,OS6360,OS6360\n",
+     "mean the same thing"),
+    ("name,management_ip,credential,credential_reference\nSW,10.0.0.1,a,a\n",
+     "mean the same thing"),
     ("name,name,management_ip,model,aos_version\n", "more than once"),
     ("", "no header row"),
 ])
@@ -246,11 +269,18 @@ async def test_invalid_rows_must_be_acknowledged(admin):
     await make_credential()
     content = GOOD + "BAD,,not-an-ip,OS6360,8.10R1,Main,access,22,true,switch-ro\n"
     job = (await validate(admin, content)).json()
-    resp = await admin.post(f"/api/switches/import/{job['id']}/confirm", json={})
+    # Atomic (default): all rows or none — a file with an invalid row is never imported.
+    for body in ({}, {"skip_invalid": True}):
+        resp = await admin.post(f"/api/switches/import/{job['id']}/confirm", json=body)
+        assert resp.status_code == 422
+        assert resp.json()["error"]["code"] == "INVALID_ROWS_ATOMIC"
+    # Per-row mode is an explicit choice, and skipping must still be acknowledged.
+    resp = await admin.post(f"/api/switches/import/{job['id']}/confirm",
+                            json={"mode": "per_row"})
     assert resp.status_code == 422
     assert resp.json()["error"]["code"] == "INVALID_ROWS_NOT_ACKNOWLEDGED"
     assert await switch_count() == 0
-    done = await run_to_end(admin, job["id"], skip_invalid=True)
+    done = await run_to_end(admin, job["id"], skip_invalid=True, mode="per_row")
     assert (done["imported"], done["skipped"]) == (2, 1)
     assert row(done, 4)["result"] == "skipped"
 
@@ -306,9 +336,11 @@ async def test_cancel_before_start(admin):
 async def test_existing_switches_are_never_silently_overwritten(admin):
     cred = await make_credential()
     async with session_factory()() as db:
-        db.add(Switch(name="R-BY-NET-SW-1", host="172.17.2.10", hostname="sw01", model="OS6360",
-                      aos_version="8.10R1", site="Old site", role="access",
-                      credential_id=cred, host_key="ssh-ed25519 AAAA", host_key_fingerprint="fp"))
+        db.add(Switch(name="R-BY-NET-SW-1", host="172.17.2.10", hostname="sw01",
+                      expected_model="OS6360", expected_aos_version="8.10R1", model="OS6360",
+                      aos_version="8.10.94.R01", discovery_status="discovered",
+                      site="Old site", role="access", credential_id=cred,
+                      host_key="ssh-ed25519 AAAA", host_key_fingerprint="fp"))
         await db.commit()
     job = (await validate(admin, GOOD)).json()
     assert job["existing_changed"] == 1 and row(job, 2)["diff"] == ["site"]
@@ -327,6 +359,8 @@ async def test_existing_switches_are_never_silently_overwritten(admin):
         sw = (await db.execute(select(Switch).where(Switch.name == "R-BY-NET-SW-1"))).scalar_one()
         assert (sw.site, sw.host, sw.host_key, sw.host_key_fingerprint) == \
             ("Main", "172.17.2.99", "", "")
+        # Another address may be another device: rediscovery before any state change.
+        assert sw.discovery_status == "not_discovered"
 
 
 async def test_address_owned_by_another_switch_is_an_error(admin):
@@ -338,18 +372,83 @@ async def test_address_owned_by_another_switch_is_an_error(admin):
     assert "already belongs to switch 'EXISTING'" in row(job, 2)["errors"][0]
 
 
-async def test_row_taken_concurrently_after_preview_fails_alone(admin):
+async def test_row_taken_concurrently_after_preview_rolls_back_atomic_import(admin):
     await make_credential()
     job = (await validate(admin, GOOD)).json()
     # Between preview and confirmation someone adds a switch with the same address.
     resp = await admin.post("/api/switches", json={"name": "RACE", "host": "172.17.2.11",
-                                                    "model": "OS6450", "aos_version": "6.7.1"})
+                                                    "expected_model": "OS6450"})
     assert resp.status_code == 201
     done = await run_to_end(admin, job["id"])
+    assert done["status"] == "failed" and "rolled back" in done["error"], done
+    assert done["imported"] == 0
+    assert row(done, 2)["result"] == "rolled_back"
+    assert await switch_count() == 1  # RACE only: the atomic import left nothing behind
+
+
+async def test_row_taken_concurrently_after_preview_fails_alone_per_row(admin):
+    await make_credential()
+    job = (await validate(admin, GOOD)).json()
+    resp = await admin.post("/api/switches", json={"name": "RACE", "host": "172.17.2.11"})
+    assert resp.status_code == 201
+    done = await run_to_end(admin, job["id"], mode="per_row")
     assert row(done, 2)["result"] == "imported"
     assert row(done, 3)["result"] == "failed" and "RACE" in row(done, 3)["message"]
     assert (done["imported"], done["failed"]) == (1, 1)
     assert await switch_count() == 2  # RACE + SW-1; no partial/corrupt rows
+
+
+async def test_export_then_import_is_unchanged_round_trip(admin):
+    cred = await make_credential()
+    async with session_factory()() as db:
+        db.add(Switch(name="SW-RT", host="10.4.4.4", hostname="sw-rt", credential_id=cred,
+                      expected_model="OS6860", model="OS6860E-P24",
+                      aos_version="8.9.221.R03", vendor="ALE", discovery_status="discovered",
+                      host_key="ssh-ed25519 AAAAC3Nza", host_key_fingerprint="SHA256:" + "A" * 43,
+                      site="Main", role="access", environment="lab",
+                      uplink_ports=["1/1/49"], port_locations={"1/1/5": "Office 204"}))
+        await db.commit()
+    for fmt in ("csv", "json"):
+        exported = (await admin.get("/api/switches/export", params={"format": fmt})).text
+        job = (await validate(admin, exported, fmt, f"switches.{fmt}")).json()
+        assert job["valid"] == 1 and job["existing_unchanged"] == 1, job
+        assert row(job, 2 if fmt == "csv" else 1)["diff"] == []
+
+
+async def test_fingerprint_that_contradicts_the_trusted_key_is_an_error(admin):
+    cred = await make_credential()
+    async with session_factory()() as db:
+        db.add(Switch(name="SW-FP", host="10.5.5.5", credential_id=cred,
+                      host_key="ssh-ed25519 AAAA", host_key_fingerprint="SHA256:" + "B" * 43))
+        await db.commit()
+    content = ("name,management_ip,credential_reference,ssh_host_key_fingerprint\n"
+               f"SW-FP,10.5.5.5,switch-ro,SHA256:{'C' * 43}\n")
+    job = (await validate(admin, content)).json()
+    assert job["invalid"] == 1 and "differs from the host key already trusted" in \
+        row(job, 2)["errors"][0]
+    bad = (await validate(admin, "name,management_ip,ssh_host_key_fingerprint\n"
+                                 "SW-Q,10.5.5.6,MD5:aa:bb\n")).json()
+    assert bad["invalid"] == 1 and "OpenSSH SHA256" in row(bad, 2)["errors"][0]
+
+
+async def test_import_with_fingerprint_starts_discovery(admin):
+    """A fingerprint supplied out of band lets discovery run right after the import. Here the
+    address is unreachable: the switch ends DISCOVERY_FAILED, nothing is trusted."""
+    await make_credential()
+    content = ("name,management_ip,ssh_port,credential_reference,ssh_host_key_fingerprint\n"
+               f"SW-D,127.0.0.1,1,switch-ro,SHA256:{'D' * 43}\n")
+    job = await run_to_end(admin, (await validate(admin, content)).json()["id"])
+    assert job["imported"] == 1 and job["discovery_job_id"], job
+    for _ in range(200):
+        discovery = (await admin.get(f"/api/discovery/jobs/{job['discovery_job_id']}")).json()
+        if discovery["status"] not in ("queued", "running"):
+            break
+        await asyncio.sleep(0.05)
+    assert discovery["status"] == "completed" and discovery["failed"] == 1, discovery
+    async with session_factory()() as db:
+        sw = (await db.execute(select(Switch).where(Switch.name == "SW-D"))).scalar_one()
+        assert sw.discovery_status == "discovery_failed" and sw.host_key == ""
+        assert sw.discovery_category == "DEVICE_UNREACHABLE"
 
 
 async def test_database_constraints_back_the_validation(admin):
@@ -379,7 +478,7 @@ async def test_database_constraints_back_the_validation(admin):
 
 
 async def test_manual_create_reports_duplicate_address(admin):
-    body = {"name": "A", "host": "10.0.0.1", "model": "OS6360", "aos_version": "8.10R1"}
+    body = {"name": "A", "host": "10.0.0.1", "expected_model": "OS6360"}
     assert (await admin.post("/api/switches", json=body)).status_code == 201
     resp = await admin.post("/api/switches", json={**body, "name": "B"})
     assert resp.status_code == 409 and "already used by switch 'A'" in resp.json()["error"][
@@ -399,16 +498,17 @@ async def test_export_never_contains_secrets_and_is_formula_safe(admin):
     assert resp.status_code == 200
     assert resp.headers["content-disposition"].startswith('attachment; filename="switches-')
     text = resp.text
-    for secret in ("Not-A-Real-Passw0rd", "AAAAC3Nza", "password_encrypted", "host_key"):
+    for secret in ("Not-A-Real-Passw0rd", "AAAAC3Nza", "ssh-ed25519", "password_encrypted"):
         assert secret not in text
     rows = list(csv.DictReader(io.StringIO(text)))
     assert rows[0]["description"].startswith("'=")  # neutralised formula
-    assert rows[0]["credential"] == "switch-ro"      # reference by name only
+    assert rows[0]["credential_reference"] == "switch-ro"  # reference by name only
+    assert rows[0]["ssh_host_key_fingerprint"] == "SHA256:x"  # public fingerprint only
 
     data = (await admin.get("/api/switches/export", params={"format": "json"})).json()
     assert data["count"] == 1 and data["switches"][0]["port_locations"] == {"1/1/5": "Office 204"}
     dumped = json.dumps(data)
-    for secret in ("Not-A-Real-Passw0rd", "AAAAC3Nza", "password", "host_key"):
+    for secret in ("Not-A-Real-Passw0rd", "AAAAC3Nza", "ssh-ed25519", "password"):
         assert secret not in dumped
     audit = [a async for a in _audit("SWITCH_EXPORT")]
     assert len(audit) == 2

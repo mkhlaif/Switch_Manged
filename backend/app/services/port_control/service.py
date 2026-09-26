@@ -33,6 +33,7 @@ from sqlalchemy import delete, func, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.error_categories import ErrorCategory, category_for_status
 from app.core.errors import (
     AppError,
     ConflictError,
@@ -45,6 +46,8 @@ from app.core.logging import get_logger, log_security
 from app.core.timeutil import utcnow
 from app.db.session import session_factory
 from app.models import (
+    ActionOutcome,
+    DiscoveryStatus,
     MacSearch,
     MacSearchResult,
     OperationLock,
@@ -74,9 +77,15 @@ from app.services import system_settings
 from app.services.alcatel.adapter import AlcatelAdapter
 from app.services.alcatel.investigation import PortInvestigation, investigate
 from app.services.alcatel.profiles import BounceMethod, CommandProfile
-from app.services.alcatel.registry import choose_strategy, load_profiles, select_profile
+from app.services.alcatel.registry import (
+    choose_strategy,
+    load_profiles,
+    profile_version,
+    select_profile,
+)
 from app.services.audit.service import record
 from app.services.classification.engine import PortClass
+from app.services.discovery.service import apply_discovery, audit_outcome, identity_problems
 from app.services.integrations.netbox import endpoint_port_evidence
 from app.services.inventory.service import build_target, known_switches
 from app.services.ssh.errors import CommandFailed, SwitchError
@@ -93,6 +102,11 @@ LIVE_STATUSES = [PortActionStatus.RUNNING.value, PortActionStatus.SUCCESS.value,
 STATE_CHANGED = "Network state changed since confirmation. Operation cancelled for safety."
 MAC_NOT_RELEARNED = "WARNING: MAC has not been relearned"
 LINK_BOUNCE_STRATEGIES = {"INTERFACE_ADMIN_STATE", "INTERFACE_ADMIN"}
+
+
+class _IdentityChanged(Exception):
+    """The device no longer reports the discovered identity (prepare stops before any other
+    command)."""
 
 
 def _step(action: PortAction, name: str, ok: bool, message: str = "", **extra) -> None:
@@ -232,6 +246,13 @@ async def prepare_restart(
         raise NotFoundError("Switch not found.")
     if not switch.enabled:
         raise AppError("The switch is disabled in the inventory.", code="SWITCH_DISABLED")
+    if switch.discovery_status != DiscoveryStatus.DISCOVERED.value:
+        # UNKNOWN DEVICE = NO STATE-CHANGING OPERATION: the identity must come from discovery.
+        raise AppError("PORT RESTART NOT AVAILABLE. The switch identity (model / AOS version) "
+                       "has not been verified by automatic discovery "
+                       f"({switch.discovery_status.replace('_', ' ')}). No command was executed.",
+                       title="PORT RESTART NOT AVAILABLE", code="DISCOVERY_REQUIRED",
+                       category=ErrorCategory.DISCOVERY_FAILED.value)
 
     profiles = await load_profiles(db)
     profile, profile_reason = select_profile(profiles, switch)
@@ -251,23 +272,31 @@ async def prepare_restart(
         switch_name=switch.name, switch_host=switch.host, aos_version=switch.aos_version,
         port=port, mac=mac, requested_by_id=user.id, requested_by=user.username,
         search_id=search_id, search_result_id=search_result_id,
-        dry_run=bool(settings["dry_run_mode"]),
+        dry_run=bool(settings["dry_run_mode"]), profile_version=profile_version(profile),
         expires_at=utcnow() + timedelta(seconds=int(settings["restart_plan_ttl_seconds"])),
     )
     ctx = ExecutionContext.for_user(user, "RESTART_PREPARE", ip, reference=f"{switch.name} {port}")
     snapshot: dict | None = None
 
-    def deny(reason: str) -> PortAction:
+    def deny(reason: str, category: str = ErrorCategory.SAFETY_CHECK_FAILED.value) -> PortAction:
         action.status = PortActionStatus.DENIED.value
         action.available = False
         action.blocked_reason = reason
+        action.outcome = ActionOutcome.BLOCKED.value
+        action.error_category = category
         return action
 
     # ---- fresh, read-only re-check through the firewall -------------------------------------
     known = await known_switches(db)
     target = await build_target(db, switch)
+    identity = None
     try:
         async with get_connector().session(target, ctx) as fs:
+            # Identity first: the device must still be exactly what discovery found.
+            info = await fs.discover()
+            identity = identity_problems(switch, info)
+            if identity:
+                raise _IdentityChanged()
             await fs.bind_profile(profile, model=switch.model or None,
                                   version=switch.aos_version or None)
             adapter = AlcatelAdapter(fs)
@@ -275,9 +304,21 @@ async def prepare_restart(
             snapshot = snapshot_data(mac, port, entries, inv)
             _step(action, "recheck", True, "Read-only re-check completed",
                   commands=fs.executed_commands())
+    except _IdentityChanged:
+        # Store the new identity as MISMATCH (audited, alert, circuit breaker) and stop.
+        outcome = apply_discovery(switch, info)
+        await db.commit()
+        await audit_outcome(db, switch, outcome, user=user, ip=ip, source="restart-prepare")
+        _step(action, "identity", False, "; ".join(identity))
+        deny("PORT RESTART BLOCKED. The device identity no longer matches the discovered "
+             f"identity ({'; '.join(identity)}). An administrator must review the switch. No "
+             "command was executed.")
+        return await _save_plan(db, action, user, ip)
     except (SwitchError, UnexpectedOutput) as exc:
         _step(action, "recheck", False, f"{exc.title}: {exc.reason}")
-        deny(f"Re-check failed: {exc.title}: {exc.reason}. No changes were made.")
+        deny(f"Re-check failed: {exc.title}: {exc.reason}. No changes were made.",
+             category_for_status(getattr(exc, "status", "")) if isinstance(exc, SwitchError)
+             else ErrorCategory.UNEXPECTED_OUTPUT.value)
         return await _save_plan(db, action, user, ip)
 
     if inv is None:
@@ -312,7 +353,9 @@ async def prepare_restart(
     action.warnings = policy.warnings + inv.warnings
     action.trunk_override = policy.trunk_override
     if not policy.allowed:
-        return await _save_plan(db, deny(policy.blocked_reason), user, ip, snapshot)
+        return await _save_plan(db, deny(policy.blocked_reason,
+                                         ErrorCategory.OPERATION_BLOCKED.value), user, ip,
+                                snapshot)
 
     # NetBox (read-only), when configured: documentation that contradicts an endpoint port.
     verdict, nb_detail = await endpoint_port_evidence(switch.name, port)
@@ -335,8 +378,8 @@ async def prepare_restart(
     if not choice.dry_run_possible:
         return await _save_plan(db, deny(
             f"PORT RESTART NOT AVAILABLE. No verified {bounce_method.value.replace('_', ' ')} "
-            f"command profile exists for this switch. {choice.reason} No command was executed."),
-            user, ip, snapshot)
+            f"command profile exists for this switch. {choice.reason} No command was executed.",
+            ErrorCategory.PROFILE_NOT_VERIFIED.value), user, ip, snapshot)
     assert choice.strategy is not None
     block = state.state_changing_block_reason(user.role_enum)
     report = await firewall.safety_test(ctx, device=switch.name, port=port, profile=profile,
@@ -374,6 +417,9 @@ async def _save_plan(db: AsyncSession, action: PortAction, user: User, ip: str,
         target_type="port_action", target_id=action.id, operation="RESTART_PORT",
         vlan=action.vlan_id, profile=action.profile_key, risk_level=action.risk_level,
         fingerprint=fps[0] if fps else "", before_state=snapshot,
+        site=await _switch_site(db, action.switch_id),
+        profile_version=action.profile_version or "", outcome=action.outcome or "",
+        error_category=action.error_category or "",
         message=action.blocked_reason or f"Plan prepared ({action.classification}, "
                                          f"{'dry run' if action.dry_run else 'live'})",
         details={"classification": action.classification, "commands": action.commands,
@@ -486,10 +532,13 @@ async def execute_restart(db: AsyncSession, user: User, *, plan_token: str,
     audit = dict(user=user, ip=ip, mac=action.mac, switch_name=action.switch_name,
                  port=action.port, target_type="port_action", target_id=action.id,
                  operation="RESTART_PORT", vlan=action.vlan_id, profile=action.profile_key,
-                 risk_level=action.risk_level)
+                 risk_level=action.risk_level, site=switch.site if switch else "",
+                 profile_version=action.profile_version or "")
     if not policy.allowed or not action.available:
         action.status = PortActionStatus.DENIED.value
         action.blocked_reason = policy.blocked_reason or action.blocked_reason
+        action.outcome = ActionOutcome.BLOCKED.value
+        action.error_category = ErrorCategory.OPERATION_BLOCKED.value
         await db.commit()
         await record(db, action="PORT_RESTART", result="DENIED", message=action.blocked_reason,
                      severity="WARNING", **audit)
@@ -527,6 +576,8 @@ async def execute_restart(db: AsyncSession, user: User, *, plan_token: str,
         await safety_test(block)
         action.status = PortActionStatus.DENIED.value
         action.blocked_reason = text
+        action.outcome = ActionOutcome.BLOCKED.value
+        action.error_category = ErrorCategory.OPERATION_BLOCKED.value
         action.finished_at = utcnow()
         _step(action, "blocked", False, text)
         await db.commit()
@@ -590,15 +641,20 @@ async def execute_restart(db: AsyncSession, user: User, *, plan_token: str,
             version=switch.aos_version or None,
             trunk_override_confirmed=action.trunk_override,
             operator_classes=set(settings["operator_restart_classes"]), confirmed=True,
+            discovery_status=switch.discovery_status, transport=switch.transport,
+            environment=switch.environment,
         )
     except CommandBlocked as exc:
         await release_locks(action.id)
         firewall.report(ctx, exc, device=action.switch_name, port=action.port, mac=action.mac)
         action.status = PortActionStatus.DENIED.value
         action.blocked_reason = exc.reason
+        action.outcome = ActionOutcome.BLOCKED.value
+        action.error_category = category_for_status("blocked", exc.event)
         await db.commit()
         await record(db, action="PORT_RESTART_BLOCKED", result="BLOCKED", severity="WARNING",
                      message=exc.reason, approval=approval, error=exc.reason,
+                     error_category=action.error_category, outcome=action.outcome,
                      details={"commands_executed": 0}, **audit)
         raise PermissionDeniedError(exc.reason, code="COMMAND_BLOCKED",
                                     title="COMMAND BLOCKED BY SAFETY POLICY") from exc
@@ -640,7 +696,9 @@ async def _run_bounce_inner(action_id: int, auth: RestartAuthorization,
             if action is not None:
                 await _finish(db, action, PortActionStatus.FAILED, ctx,
                               f"Internal error ({exc.__class__.__name__}). Check the port "
-                              "state on the switch manually.", approval=approval)
+                              "state on the switch manually.", approval=approval,
+                              outcome=ActionOutcome.UNKNOWN,
+                              category=ErrorCategory.INTERNAL_ERROR.value)
         finally:
             get_firewall().close_authorization(auth)
             await release_locks(action_id)
@@ -651,13 +709,14 @@ async def _bounce(db: AsyncSession, action: PortAction, auth: RestartAuthorizati
     switch = await db.get(Switch, action.switch_id) if action.switch_id else None
     if switch is None:
         await _finish(db, action, PortActionStatus.ABORTED, ctx,
-                      "Switch no longer exists. Nothing was changed.", approval=approval)
+                      "Switch no longer exists. Nothing was changed.", approval=approval,
+                      category=ErrorCategory.CONFIGURATION_ERROR.value)
         return
     profile = (await load_profiles(db)).get(action.profile_key)
     if profile is None:
         await _finish(db, action, PortActionStatus.ABORTED, ctx,
                       "Command profile no longer exists. Nothing was changed.",
-                      approval=approval)
+                      approval=approval, category=ErrorCategory.PROFILE_NOT_FOUND.value)
         return
     settings = await system_settings.get_all(db)
     known = await known_switches(db)
@@ -670,6 +729,23 @@ async def _bounce(db: AsyncSession, action: PortAction, auth: RestartAuthorizati
 
     try:
         async with get_connector().session(target, ctx) as fs:
+            # The device must still be exactly the discovered one, in this very session.
+            identity = identity_problems(switch, await fs.discover())
+            if identity:
+                _step(action, "identity", False, "; ".join(identity))
+                switch.discovery_status = "mismatch"
+                switch.discovery_category = ErrorCategory.SAFETY_CHECK_FAILED.value
+                switch.discovery_error = ("Identity changed before a restart: "
+                                          + "; ".join(identity))[:255]
+                from app.security.circuit_breaker import get_breaker
+
+                get_breaker().record_profile_mismatch(switch_name=switch.name,
+                                                      detail="; ".join(identity))
+                await _finish(db, action, PortActionStatus.ABORTED, ctx,
+                              f"{STATE_CHANGED} (the device identity changed: "
+                              f"{'; '.join(identity)}). Nothing was changed.",
+                              approval=approval)
+                return
             await fs.bind_profile(profile, model=switch.model or None,
                                   version=switch.aos_version or None)
             adapter = AlcatelAdapter(fs)
@@ -700,7 +776,8 @@ async def _bounce(db: AsyncSession, action: PortAction, auth: RestartAuthorizati
                     _step(action, "down", False, f"Blocked: {exc.reason}")
                     await _finish(db, action, PortActionStatus.ABORTED, ctx,
                                   f"COMMAND BLOCKED BY SAFETY POLICY: {exc.reason}",
-                                  approval=approval, before=before)
+                                  approval=approval, before=before,
+                                  category=ErrorCategory.OPERATION_BLOCKED.value)
                     return
                 except CommandFailed as exc:
                     _step(action, "down", False, f"Switch rejected: {exc.reason}")
@@ -708,7 +785,8 @@ async def _bounce(db: AsyncSession, action: PortAction, auth: RestartAuthorizati
                                   f"The switch rejected the down command ({exc.reason}). The "
                                   "selected command profile may not be compatible with this AOS "
                                   "version. No configuration changes were made.",
-                                  approval=approval, before=before)
+                                  approval=approval, before=before,
+                                  category=ErrorCategory.COMMAND_REJECTED.value)
                     return
                 down_sent = True
                 down_cmd = action.commands[0]
@@ -730,7 +808,8 @@ async def _bounce(db: AsyncSession, action: PortAction, auth: RestartAuthorizati
         if not down_sent:
             await _finish(db, action, PortActionStatus.FAILED, ctx,
                           f"{exc.title}: {exc.reason}. The down command was NOT sent; no "
-                          "configuration changes were made.", approval=approval, before=before)
+                          "configuration changes were made.", approval=approval, before=before,
+                          category=category_for_status(exc.status))
             return
 
     up_cmd = action.commands[1]
@@ -742,7 +821,8 @@ async def _bounce(db: AsyncSession, action: PortAction, auth: RestartAuthorizati
         log_security(log, "%s (action %s)", msg, action.id)
         _alert_failed(action, msg)
         await _finish(db, action, PortActionStatus.FAILED, ctx, msg, approval=approval,
-                      before=before)
+                      before=before, outcome=ActionOutcome.UNKNOWN,
+                      category=ErrorCategory.VERIFICATION_FAILED.value)
         return
 
     action.commands_executed = list(action.commands)
@@ -781,7 +861,8 @@ async def _bounce(db: AsyncSession, action: PortAction, auth: RestartAuthorizati
                f"(state: {verification.get('port_status') or 'unknown'}).")
         _alert_failed(action, msg)
         await _finish(db, action, PortActionStatus.FAILED, ctx, msg, approval=approval,
-                      before=before, after=after)
+                      before=before, after=after, outcome=ActionOutcome.VERIFICATION_FAILED,
+                      category=ErrorCategory.VERIFICATION_FAILED.value)
 
 
 def _alert_failed(action: PortAction, message: str) -> None:
@@ -948,13 +1029,43 @@ async def change_report(db: AsyncSession, action: PortAction) -> dict:
 
 async def _finish(db: AsyncSession, action: PortAction, status: PortActionStatus,
                   ctx: ExecutionContext, message: str, *, approval: str = "",
-                  before: dict | None = None, after: dict | None = None) -> None:
+                  before: dict | None = None, after: dict | None = None,
+                  outcome: ActionOutcome | None = None, category: str = "") -> None:
     action.status = status.value
     action.finished_at = utcnow()
     action.result_message = message
     if status in (PortActionStatus.FAILED, PortActionStatus.ABORTED):
         action.error_message = message
+    verification = action.verification or {}
+    if outcome is None:
+        if status is PortActionStatus.SUCCESS:
+            outcome = ActionOutcome.SUCCESS if verification.get("verified") else \
+                ActionOutcome.VERIFICATION_FAILED
+        elif status is PortActionStatus.ABORTED:
+            outcome = ActionOutcome.BLOCKED  # stopped before any state-changing command
+        else:
+            outcome = ActionOutcome.FAILED
+    if not category and outcome is ActionOutcome.VERIFICATION_FAILED:
+        category = ErrorCategory.VERIFICATION_FAILED.value
+    elif not category and outcome is ActionOutcome.BLOCKED:
+        category = ErrorCategory.SAFETY_CHECK_FAILED.value
+    elif not category and outcome is not ActionOutcome.SUCCESS:
+        category = ErrorCategory.INTERNAL_ERROR.value
+    action.outcome, action.error_category = outcome.value, category
     await db.commit()
+    # Circuit breaker: the port did not come back / its state could not be confirmed, or it came
+    # back different (VLANs / classification). A MAC that is merely not relearned (e.g. a device
+    # that is switched off) is reported, but does not count as a network-level failure.
+    problems = [p for p in verification.get("verification_problems") or []
+                if p != "MAC not relearned on the port"]
+    if outcome is ActionOutcome.UNKNOWN or (
+            outcome is ActionOutcome.VERIFICATION_FAILED and
+            (status is not PortActionStatus.SUCCESS or problems)):
+        from app.security.circuit_breaker import get_breaker
+
+        get_breaker().record_verification_failure(
+            switch_name=action.switch_name,
+            detail=f"{action.port}: {'; '.join(problems) or message[:100]}")
     critical = message.startswith("CRITICAL")
     fingerprints = [s.get("fingerprint") for s in action.steps or [] if s.get("fingerprint")]
     await record(
@@ -967,12 +1078,22 @@ async def _finish(db: AsyncSession, action: PortAction, status: PortActionStatus
         profile=action.profile_key, risk_level=action.risk_level,
         fingerprint=fingerprints[0] if fingerprints else "", approval=approval,
         error=message if status is not PortActionStatus.SUCCESS else "",
-        before_state=before, after_state=after,
+        before_state=before, after_state=after, outcome=action.outcome,
+        error_category=action.error_category, profile_version=action.profile_version or "",
+        site=await _switch_site(db, action.switch_id),
         severity="CRITICAL" if critical else ("INFO" if status is PortActionStatus.SUCCESS
                                               else "WARNING"),
-        details={"status": status.value, "commands_executed": action.commands_executed,
+        details={"status": status.value, "outcome": action.outcome,
+                 "commands_executed": action.commands_executed,
                  "fingerprints": fingerprints, "verification": action.verification},
     )
+
+
+async def _switch_site(db: AsyncSession, switch_id: int | None) -> str:
+    if switch_id is None:
+        return ""
+    return (await db.execute(select(Switch.site).where(Switch.id == switch_id))
+            ).scalar_one_or_none() or ""
 
 
 async def mark_interrupted_actions(db: AsyncSession) -> int:

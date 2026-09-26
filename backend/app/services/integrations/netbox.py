@@ -187,6 +187,12 @@ def compare_device(switch, nb: dict | None) -> list[dict]:
             switch.model.upper().split("-")[0]):
         out.append({"field": "model", "inventory": switch.model, "netbox": nb.get("model"),
                     "message": "Model differs."})
+    # Sites are compared in slug form ("Building A" == "building-a"); NetBox is never changed.
+    ours_site = re.sub(r"[^a-z0-9]+", "-", (getattr(switch, "site", "") or "").lower()).strip("-")
+    nb_site = re.sub(r"[^a-z0-9]+", "-", str(nb.get("site") or "").lower()).strip("-")
+    if ours_site and nb_site and ours_site != nb_site:
+        out.append({"field": "site", "inventory": switch.site, "netbox": nb.get("site"),
+                    "message": "Site differs."})
     nb_role = _ROLE_MAP.get(str(nb.get("role") or "").lower())
     if nb_role and switch.role and switch.role != "unknown" and nb_role != switch.role:
         out.append({"field": "role", "inventory": switch.role, "netbox": nb.get("role"),

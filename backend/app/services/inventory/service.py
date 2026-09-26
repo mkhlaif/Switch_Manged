@@ -12,7 +12,7 @@ from app.core.errors import AppError
 from app.core.timeutil import utcnow
 from app.models import Credential, Switch, SwitchStatus
 from app.services.alcatel.profiles import BUILTIN_PROFILES
-from app.services.alcatel.registry import load_profiles, select_profile
+from app.services.alcatel.registry import select_profile
 from app.security.firewall import ExecutionContext
 from app.services.ssh.errors import SwitchError
 from app.services.ssh.manager import ConnectionTarget, get_connector
@@ -98,28 +98,6 @@ async def test_connection(db: AsyncSession, switch: Switch, ctx: ExecutionContex
     return {"ok": True, "status": "online", "duration_ms": int((time.monotonic() - started) * 1000),
             "model": info.model, "version": info.version, "system_name": info.name,
             "commands": commands}
-
-
-async def detect(db: AsyncSession, switch: Switch, ctx: ExecutionContext) -> dict:
-    """Detect model/AOS version via the discovery profile and select the command profile."""
-    result = await test_connection(db, switch, ctx)
-    if not result["ok"]:
-        return result
-    changed = {}
-    if result.get("model") and result["model"] != switch.model:
-        changed["model"] = [switch.model, result["model"]]
-        switch.model = result["model"]
-    if result.get("version") and result["version"] != switch.aos_version:
-        changed["aos_version"] = [switch.aos_version, result["version"]]
-        switch.aos_version = result["version"]
-    profile, reason = select_profile(await load_profiles(db), switch)
-    await db.commit()
-    result.update({
-        "changed": changed,
-        "profile": profile.key if profile else None,
-        "profile_reason": reason,
-    })
-    return result
 
 
 async def fetch_host_key(switch: Switch) -> dict:

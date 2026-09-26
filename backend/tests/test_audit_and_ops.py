@@ -81,24 +81,46 @@ async def test_switch_test_connection_uses_show_system_only(operator, lab):
     assert not bad["ok"] and bad["title"] == "SSH AUTHENTICATION FAILED"
 
 
-async def test_detect_updates_version_and_profile(admin):
+async def test_discovery_identifies_switch_and_selects_profile(admin, lab):
     ids = await seed_lab_switches(["SIM-SW-03"], unknown_version=("SIM-SW-03",))
-    result = (await admin.post(f"/api/switches/{ids['SIM-SW-03']}/detect")).json()
-    assert result["ok"] and result["profile"] == "AOS6"
-    assert result["changed"]["aos_version"][1] == "6.7.2.191.R08"
+    before = (await admin.get(f"/api/switches/{ids['SIM-SW-03']}")).json()
+    assert before["discovery_status"] == "not_discovered" and before["effective_profile"] is None
+    for route in ("discover", "detect"):  # detect = former name of the same endpoint
+        result = (await admin.post(f"/api/switches/{ids['SIM-SW-03']}/{route}")).json()
+        assert result["ok"] and result["status"] == "discovered", result
+        assert result["vendor"] == "ALE" and result["model"] == "OS6450-P24"
+        assert result["version"] == "6.7.2.191.R08" and result["profile"] == "AOS6"
+        assert result["discovery_profile"] == "ALE_AOS6_SHOW_SYSTEM"
+        assert result["commands"] == ["show system"]
+    assert lab["SIM-SW-03"].command_log == ["show system", "show system"]
+    sw = (await admin.get(f"/api/switches/{ids['SIM-SW-03']}")).json()
+    assert sw["discovery_status"] == "discovered" and sw["effective_profile"] == "AOS6"
+    assert sw["system_object_id"].startswith("1.3.6.1.4.1.6486.")
+    audit = (await admin.get("/api/audit", params={"action": "DEVICE_DISCOVERY"})).json()
+    assert audit["items"][0]["result"] == "SUCCESS"
 
 
 async def test_switch_inventory_crud_and_validation(admin):
     cred = (await admin.post("/api/credentials", json={"name": "c", "username": "u",
                                                         "password": "p"})).json()
-    body = {"name": "SW-ACCESS-01", "host": "192.0.2.10", "model": "OS6450-P24",
-            "aos_version": "6.7.2.191.R08", "location": "Building A", "credential_id": cred["id"],
-            "uplink_ports": ["1/25", "1/26"]}
+    body = {"name": "SW-ACCESS-01", "host": "192.0.2.10", "expected_model": "OS6450-P24",
+            "expected_aos_version": "6.7.2.191.R08", "location": "Building A",
+            "credential_id": cred["id"], "uplink_ports": ["1/25", "1/26"]}
+    # Model / AOS version are discovered, never entered.
+    for field, value in (("model", "OS6450-P24"), ("aos_version", "6.7.2.191.R08")):
+        typed = await admin.post("/api/switches", json={**body, field: value})
+        assert typed.status_code == 422, typed.text
     created = await admin.post("/api/switches", json=body)
     assert created.status_code == 201, created.text
     sw = created.json()
-    assert sw["effective_profile"] == "AOS6" and sw["credential_name"] == "c"
-    assert sw["host_key_trusted"] is False
+    assert sw["model"] == "" and sw["aos_version"] == ""
+    assert sw["expected_model"] == "OS6450-P24" and sw["environment"] == "production"
+    assert sw["discovery_status"] == "not_discovered" and sw["effective_profile"] is None
+    assert "not been discovered" in sw["profile_reason"]
+    assert sw["credential_name"] == "c" and sw["host_key_trusted"] is False
+    bad_fp = await admin.post("/api/switches", json={
+        **body, "name": "z", "host": "192.0.2.99", "expected_host_key_fingerprint": "abc"})
+    assert bad_fp.status_code == 422
     assert (await admin.post("/api/switches", json=body)).status_code == 409
     assert (await admin.post("/api/switches", json={**body, "name": "x", "host": "bad host;"})
             ).status_code == 422
@@ -115,9 +137,13 @@ async def test_real_ssh_switch_without_host_key_fails_safely(admin):
                                                         "password": "p"})).json()
     sw = (await admin.post("/api/switches", json={
         "name": "NO-KEY", "host": "127.0.0.1", "ssh_port": 1, "credential_id": cred["id"],
-        "aos_version": "8.10.94.R03"})).json()
+        "expected_aos_version": "8.10.94.R03"})).json()
     result = (await admin.post(f"/api/switches/{sw['id']}/test")).json()
     assert not result["ok"] and result["status"] == "hostkey_error"
+    # Discovery refuses to run without a trusted key (and without an expected fingerprint).
+    outcome = (await admin.post(f"/api/switches/{sw['id']}/discover")).json()
+    assert not outcome["ok"] and outcome["status"] == "discovery_failed"
+    assert outcome["category"] == "HOST_KEY_UNTRUSTED" and outcome["commands"] == []
 
 
 async def test_profiles_listing_and_verifications(admin):
@@ -142,10 +168,43 @@ async def test_profiles_listing_and_verifications(admin):
     assert ok.status_code == 201
     record = ok.json()["verifications"][0]
     assert record["verified_by"] == "admin" and record["model_family"] == "OS6900"
+    assert record["status"] == "LAB_VERIFIED"
     assert (await add()).status_code == 409
-    read = await add(capability="READ", model_family="*")
+    # Nobody verifies "every model" or a whole major release.
+    assert (await add(capability="READ", model_family="*")).status_code == 422
+    assert (await add(capability="READ", version_prefix="8")).status_code == 422
+    read = await add(capability="READ")
     assert read.status_code == 201
-    assert (await admin.delete(f"/api/profiles/verifications/{record['id']}")).status_code == 200
+    assert data["profile_states"] == ["DRAFT", "LAB_VERIFIED", "PRODUCTION_VERIFIED",
+                                      "BLOCKED", "DEPRECATED"]
+    assert keys["AOS8"]["evidence_level"] == "FIXTURE_TESTED" and keys["AOS8"]["version"]
+    assert {d["key"] for d in data["discovery_profiles"]} == {"ALE_AOS8_SHOW_SYSTEM",
+                                                             "ALE_AOS6_SHOW_SYSTEM"}
+
+    async def status(rid, to, reason="lab review"):
+        return await admin.post(f"/api/profiles/verifications/{rid}/status",
+                                json={"status": to, "reason": reason})
+
+    # PRODUCTION_VERIFIED needs recorded evidence from a real switch: there is none.
+    promote = await status(record["id"], "PRODUCTION_VERIFIED")
+    assert promote.status_code == 422 and "No production evidence" in promote.text
+    assert (await status(record["id"], "BLOCKED", "x")).status_code == 422  # reason too short
+    blocked = await status(record["id"], "BLOCKED", "wrong syntax on 8.10R2")
+    assert blocked.status_code == 200
+    assert (await add()).status_code == 409  # BLOCKED is not silently re-verified
+    assert (await status(record["id"], "PRODUCTION_VERIFIED")).status_code == 409
+    assert (await status(record["id"], "LAB_VERIFIED", "fixed in 8.10R3")).status_code == 200
+    # Revoke = DEPRECATED (kept for history); adding it again revives it.
+    revoked = await admin.delete(f"/api/profiles/verifications/{record['id']}")
+    assert revoked.status_code == 200
+    row = next(v for v in revoked.json()["verifications"] if v["id"] == record["id"])
+    assert row["status"] == "DEPRECATED"
+    revived = await add(notes="re-tested")
+    assert revived.status_code == 201
+    row = next(v for v in revived.json()["verifications"] if v["id"] == record["id"])
+    assert row["status"] == "LAB_VERIFIED" and row["notes"] == "re-tested"
+    changes = (await admin.get("/api/audit", params={"action": "PROFILE_STATE_CHANGE"})).json()
+    assert [i["result"] for i in changes["items"]] == ["SUCCESS", "SUCCESS"]
 
 
 async def test_custom_profile_is_linted(admin):

@@ -25,6 +25,7 @@ class AppError(Exception):
         action: str | None = None,
         status_code: int | None = None,
         details: dict | None = None,
+        category: str | None = None,
     ) -> None:
         super().__init__(message)
         self.message = message
@@ -36,9 +37,16 @@ class AppError(Exception):
             self.status_code = status_code
         self.action = action
         self.details = details or {}
+        self.category = category
 
     def to_dict(self) -> dict:
+        from app.core.error_categories import _BY_CODE
+
         body = {"code": self.code, "title": self.title, "message": self.message}
+        category = self.category or (_BY_CODE[self.code].value if self.code in _BY_CODE
+                                     else None)
+        if category:
+            body["category"] = category  # safe error category (core/error_categories)
         if self.action:
             body["action"] = self.action
         if self.details:

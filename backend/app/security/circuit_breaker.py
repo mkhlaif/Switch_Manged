@@ -8,7 +8,11 @@ Trips into SAFE MODE when, within the configured window:
 * N consecutive authentication failures on previously healthy switches (default 3);
 * N HIGH/CRITICAL command-validation failures (default 3) — injection attempts, forged or
   dangerous commands, budget violations;
-* N unexpected CLI responses (default 3) — output that does not match the command's contract.
+* N unexpected CLI responses (default 3) — output that does not match the command's contract;
+* N device identity mismatches (default 3) — discovery found another model / AOS version than
+  expected or than before (profile mismatch);
+* N failed post-restart verifications (default 3) — restarts whose postcondition could not be
+  confirmed.
 
 SAFE MODE is persisted in the database (it survives restarts) and blocks every state-changing
 operation. Read-only operations continue. Only an administrator can reset it.
@@ -26,6 +30,7 @@ log = get_logger("security.breaker")
 
 DEFAULTS = {"breaker_ssh_failures": 5, "breaker_auth_failures": 3,
             "breaker_validation_failures": 3, "breaker_unexpected_output": 3,
+            "breaker_profile_mismatches": 3, "breaker_verification_failures": 3,
             "breaker_window_minutes": 10}
 
 
@@ -35,6 +40,8 @@ class CircuitBreaker:
         self.auth_failures: deque[float] = deque()
         self.validation_failures: deque[float] = deque()
         self.unexpected_output: deque[float] = deque()
+        self.profile_mismatches: deque[float] = deque()
+        self.verification_failures: deque[float] = deque()
         self.last_events: deque[str] = deque(maxlen=20)
         self._tasks: set[asyncio.Task] = set()
         self._tripping = False
@@ -63,9 +70,22 @@ class CircuitBreaker:
         self.last_events.append(f"Unexpected CLI output on {switch_name}: {detail[:120]}")
         self._schedule()
 
+    def record_profile_mismatch(self, *, switch_name: str, detail: str) -> None:
+        self.profile_mismatches.append(time.monotonic())
+        self.last_events.append(f"Identity mismatch on {switch_name}: {detail[:120]}")
+        self._schedule()
+
+    def record_verification_failure(self, *, switch_name: str, detail: str) -> None:
+        self.verification_failures.append(time.monotonic())
+        self.last_events.append(f"Restart not verified on {switch_name}: {detail[:120]}")
+        self._schedule()
+
+    def _queues(self) -> tuple:
+        return (self.ssh_failures, self.auth_failures, self.validation_failures,
+                self.unexpected_output, self.profile_mismatches, self.verification_failures)
+
     def reset(self) -> None:
-        for q in (self.ssh_failures, self.auth_failures, self.validation_failures,
-                  self.unexpected_output):
+        for q in self._queues():
             q.clear()
         self._tripping = False
 
@@ -73,6 +93,8 @@ class CircuitBreaker:
         return {"ssh_failures": len(self.ssh_failures), "auth_failures": len(self.auth_failures),
                 "validation_failures": len(self.validation_failures),
                 "unexpected_output": len(self.unexpected_output),
+                "profile_mismatches": len(self.profile_mismatches),
+                "verification_failures": len(self.verification_failures),
                 "recent_events": list(self.last_events)}
 
     async def flush(self) -> None:
@@ -105,8 +127,7 @@ class CircuitBreaker:
         t = await self._thresholds()
         window = t["breaker_window_minutes"] * 60
         now = time.monotonic()
-        for q in (self.ssh_failures, self.auth_failures, self.validation_failures,
-                  self.unexpected_output):
+        for q in self._queues():
             while q and now - q[0] > window:
                 q.popleft()
         reason = None
@@ -118,6 +139,10 @@ class CircuitBreaker:
             reason = f"{len(self.validation_failures)} command validation failures"
         elif len(self.unexpected_output) >= t["breaker_unexpected_output"]:
             reason = f"{len(self.unexpected_output)} unexpected CLI responses"
+        elif len(self.profile_mismatches) >= t["breaker_profile_mismatches"]:
+            reason = f"{len(self.profile_mismatches)} device identity (profile) mismatches"
+        elif len(self.verification_failures) >= t["breaker_verification_failures"]:
+            reason = f"{len(self.verification_failures)} restarts could not be verified"
         if reason:
             self._tripping = True
             await trip(reason, list(self.last_events))

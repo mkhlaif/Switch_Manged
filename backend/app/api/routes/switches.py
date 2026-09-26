@@ -12,10 +12,17 @@ from app.core.errors import AppError, ConflictError, NotFoundError, ValidationFa
 from app.core.ratelimit import limiter
 from app.db.session import get_db
 from app.models import Credential, Switch, User
-from app.schemas.common import SwitchCreate, SwitchOut, SwitchUpdate, TrustHostKeyRequest
+from app.schemas.common import (
+    DiscoveryAccept,
+    SwitchCreate,
+    SwitchOut,
+    SwitchUpdate,
+    TrustHostKeyRequest,
+)
 from app.security.firewall import ExecutionContext
 from app.services.alcatel.registry import load_profiles, select_profile
 from app.services.audit.service import record
+from app.services.discovery import service as discovery
 from app.services.inventory import service as inventory
 from app.services.port_query import query_port
 
@@ -40,6 +47,12 @@ async def _get(db: AsyncSession, switch_id: int) -> Switch:
     if sw is None:
         raise NotFoundError("Switch not found.")
     return sw
+
+
+# Changing any of these can make the device a different one: its identity must be rediscovered.
+IDENTITY_FIELDS = {"host", "ssh_port", "transport"}
+REDISCOVER_FIELDS = IDENTITY_FIELDS | {"credential_id", "expected_model", "expected_aos_version",
+                                       "expected_host_key_fingerprint", "enabled"}
 
 
 def _check_transport(transport: str | None) -> None:
@@ -101,7 +114,9 @@ async def create_switch(body: SwitchCreate, request: Request, admin: User = Depe
     await _commit(db)
     await record(db, action="SWITCH_CREATE", result="SUCCESS", user=admin, ip=client_ip(request),
                  target_type="switch", target_id=sw.id, target_label=sw.name,
-                 switch_name=sw.name, details=body.model_dump())
+                 switch_name=sw.name, site=sw.site, details=body.model_dump())
+    if discovery.can_discover(sw):
+        await discovery.create_job(db, admin, [sw.id], source="create")
     return await _out(db, sw)
 
 
@@ -122,13 +137,22 @@ async def update_switch(switch_id: int, body: SwitchUpdate, request: Request,
         # A different endpoint means a different host key; require re-enrollment.
         sw.host_key, sw.host_key_fingerprint = "", ""
         changes["host_key_cleared"] = True
+    changed = {k for k, v in changes.items() if hasattr(sw, k) and getattr(sw, k) != v}
+    if changed & IDENTITY_FIELDS:
+        # Possibly another device: nothing may be changed on it until it is rediscovered.
+        sw.discovery_status = "not_discovered"
+        sw.discovery_error = "Management address or transport changed: rediscovery required."
+        sw.discovery_category = ""
+        changes["discovery_reset"] = True
     for key, value in changes.items():
-        if hasattr(sw, key) and key != "host_key_cleared":
+        if hasattr(sw, key) and key not in {"host_key_cleared", "discovery_reset"}:
             setattr(sw, key, value)
     await _commit(db)
     await record(db, action="SWITCH_UPDATE", result="SUCCESS", user=admin, ip=client_ip(request),
                  target_type="switch", target_id=sw.id, target_label=sw.name,
-                 switch_name=sw.name, details=changes)
+                 switch_name=sw.name, site=sw.site, details=changes)
+    if changed & REDISCOVER_FIELDS and discovery.can_discover(sw):
+        await discovery.create_job(db, admin, [sw.id], source="update")
     return await _out(db, sw)
 
 
@@ -156,17 +180,28 @@ async def test_switch(switch_id: int, request: Request, user: User = Depends(req
     return result
 
 
-@router.post("/{switch_id}/detect")
-async def detect_switch(switch_id: int, request: Request, admin: User = Depends(require(Permission.MANAGE_INVENTORY)),
-                        db: AsyncSession = Depends(get_db)) -> dict:
+@router.post("/{switch_id}/discover")
+@router.post("/{switch_id}/detect")  # former name, kept for compatibility
+async def discover_switch(switch_id: int, request: Request,
+                          admin: User = Depends(require(Permission.MANAGE_INVENTORY)),
+                          db: AsyncSession = Depends(get_db)) -> dict:
+    """Identify the device now (read-only discovery command only) and store the result."""
     limiter.hit(f"switch-detect:{admin.id}", limit=20, window_seconds=60)
     sw = await _get(db, switch_id)
-    ctx = ExecutionContext.for_user(admin, "SWITCH_DETECT", client_ip(request), reference=sw.name)
-    result = await inventory.detect(db, sw, ctx)
-    await record(db, action="SWITCH_DETECT", result="SUCCESS" if result["ok"] else "FAILED",
-                 user=admin, ip=client_ip(request), target_type="switch", target_id=sw.id,
-                 switch_name=sw.name, details={k: v for k, v in result.items() if k != "commands"})
-    return result
+    ctx = ExecutionContext.for_user(admin, "DISCOVERY", client_ip(request), reference=sw.name)
+    outcome = await discovery.discover_switch(db, sw, ctx, user=admin, source="manual")
+    return outcome.to_dict()
+
+
+@router.post("/{switch_id}/discovery/accept", response_model=SwitchOut)
+async def accept_discovered_identity(switch_id: int, body: DiscoveryAccept, request: Request,
+                                     admin: User = Depends(require(Permission.MANAGE_INVENTORY)),
+                                     db: AsyncSession = Depends(get_db)):
+    """An administrator confirms that a changed device identity (MISMATCH) is expected, e.g.
+    after an AOS upgrade. The next restart re-verifies the identity again."""
+    sw = await _get(db, switch_id)
+    await discovery.accept_identity(db, sw, admin, body.reason, client_ip(request))
+    return await _out(db, sw)
 
 
 @router.post("/{switch_id}/host-key/fetch")
@@ -200,6 +235,8 @@ async def trust_host_key(switch_id: int, body: TrustHostKeyRequest, request: Req
     await record(db, action="HOSTKEY_TRUST", result="SUCCESS", user=admin, ip=client_ip(request),
                  target_type="switch", target_id=sw.id, switch_name=sw.name,
                  details={"fingerprint": data["fingerprint"], "previous": previous})
+    if discovery.can_discover(sw):
+        await discovery.create_job(db, admin, [sw.id], source="host-key-trust")
     return await _out(db, sw)
 
 

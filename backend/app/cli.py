@@ -76,10 +76,9 @@ async def _seed_lab() -> int:
                 db.add(Switch(
                     name=sim.name, host=sim.name, ssh_port=22, transport="simulator",
                     location=sim.location, description=f"Simulated {sim.model}",
-                    # Leave model/version empty on one switch so auto-detection is exercised.
-                    model="" if sim.name == "SIM-SW-03" else sim.model,
-                    aos_version="" if sim.name == "SIM-SW-03" else sim.version,
-                    credential_id=cred.id,
+                    # No model / AOS version: automatic discovery identifies every switch
+                    # (on the first search or an explicit discovery run).
+                    environment="lab", credential_id=cred.id,
                     role=LAB_ROLES.get(sim.name, "access"),
                 ))
                 added += 1

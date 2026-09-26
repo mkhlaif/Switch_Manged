@@ -13,8 +13,16 @@ decides "trunk" from VLAN count alone:
   definitive inter-switch evidence; ports of switches whose inventory role is core or
   distribution are reported as infrastructure (the restart policy blocks them).
 
-Output categories: ACCESS, LIKELY_ACCESS, LIKELY_TRUNK, TRUNK, UNKNOWN, each with a confidence
-label (High/Medium/Low), a numeric confidence (0-1) and the list of reasons.
+Output categories, each with a confidence label (High/Medium/Low), a numeric confidence (0-1)
+and the list of reasons:
+
+* evidence-based: ACCESS, LIKELY_ACCESS, LIKELY_TRUNK, TRUNK, UNKNOWN — a LIKELY_* result with
+  Low confidence is reported as UNKNOWN (insufficient confidence is never a restart candidate);
+* definitive / role-based, which override the evidence: UPLINK (declared in the inventory),
+  LAG (MAC learned on a link aggregate — "aggregation"), STACK and MANAGEMENT (port description),
+  CORE and DISTRIBUTION (the switch's inventory role).
+
+Only ACCESS and LIKELY_ACCESS are ever restart candidates (restart_policy.py decides further).
 """
 
 from __future__ import annotations
@@ -33,21 +41,39 @@ class PortClass(str, enum.Enum):
     UNKNOWN = "UNKNOWN"
     LIKELY_TRUNK = "LIKELY_TRUNK"
     TRUNK = "TRUNK"
+    UPLINK = "UPLINK"
+    LAG = "LAG"
+    CORE = "CORE"
+    DISTRIBUTION = "DISTRIBUTION"
+    MANAGEMENT = "MANAGEMENT"
+    STACK = "STACK"
 
 
 TRUNKISH = {PortClass.LIKELY_TRUNK, PortClass.TRUNK}
+RESTART_CANDIDATES = {PortClass.ACCESS, PortClass.LIKELY_ACCESS}
+# Never restarted by anyone (no override): identified as structural links of the network.
+HARD_BLOCKED = {PortClass.UPLINK, PortClass.LAG, PortClass.MANAGEMENT, PortClass.STACK,
+                PortClass.UNKNOWN}
 RISK_ORDER = {
     PortClass.ACCESS: 0,
     PortClass.LIKELY_ACCESS: 1,
     PortClass.UNKNOWN: 2,
     PortClass.LIKELY_TRUNK: 3,
     PortClass.TRUNK: 4,
+    PortClass.DISTRIBUTION: 5,
+    PortClass.CORE: 5,
+    PortClass.MANAGEMENT: 6,
+    PortClass.STACK: 6,
+    PortClass.LAG: 6,
+    PortClass.UPLINK: 6,
 }
 
 _UPLINK_WORDS = re.compile(
     r"(?i)\b(uplink|up-link|trunk|core|distribution|dist|backbone|isl|lag|inter-?switch|"
     r"to[-_ ]?(?:sw|switch|core|dist))\b"
 )
+_MANAGEMENT_WORDS = re.compile(r"(?i)\b(mgmt|management|oob|out-of-band)\b")
+_STACK_WORDS = re.compile(r"(?i)\b(stack|stacking|vfl|virtual[- ]chassis)\b")
 
 
 @dataclass
@@ -101,13 +127,49 @@ def _definitive(category: PortClass, text: str) -> Classification:
 
 def classify_port(data: ClassificationInput) -> Classification:
     if data.declared_uplink:
-        return _definitive(PortClass.TRUNK, "Port is declared as an uplink in the switch inventory.")
+        return _definitive(PortClass.UPLINK, "Port is declared as an uplink in the switch "
+                                             "inventory.")
     if data.is_linkagg:
         return _definitive(
-            PortClass.TRUNK,
+            PortClass.LAG,
             f"MAC is learned on link aggregate {data.linkagg_id} (a bundle of links, "
             "typically an uplink between switches).",
         )
+    evidence = _classify_evidence(data)
+    if data.alias and _STACK_WORDS.search(data.alias):
+        return _override(PortClass.STACK, f"Interface description '{data.alias}' marks a "
+                         "stacking / virtual-chassis link.", evidence)
+    if data.alias and _MANAGEMENT_WORDS.search(data.alias):
+        return _override(PortClass.MANAGEMENT, f"Interface description '{data.alias}' marks "
+                         "a management / out-of-band connection.", evidence)
+    role = (data.switch_role or "").lower()
+    if role in {"core", "distribution"}:
+        return _override(PortClass.CORE if role == "core" else PortClass.DISTRIBUTION,
+                         f"The switch is a {role} switch (inventory topology role); its ports "
+                         "are network infrastructure.", evidence)
+    return evidence
+
+
+def _override(category: PortClass, text: str, evidence: Classification) -> Classification:
+    """Definitive category from inventory / description; the evidence is kept as reasons."""
+    reasons = [Reason("trunk", text, 10.0),
+               Reason("neutral", f"Evidence alone: {evidence.category.value} "
+                      f"({evidence.confidence} confidence)."), *evidence.reasons]
+    return Classification(category, "High", 0.99, evidence.trunk_score, evidence.access_score,
+                          reasons)
+
+
+def _voice_vlan_pattern(data: ClassificationInput) -> bool:
+    """IP phone + PC: exactly one LLDP neighbor, which is a telephone (phones also advertise
+    Bridge for their PC port), at most 3 learned MACs. The single tagged VLAN is then the voice
+    VLAN, not trunk evidence."""
+    if not data.lldp or len(data.lldp) != 1 or data.mac_count is None or data.mac_count > 3:
+        return False
+    caps = set(data.lldp[0].capabilities)
+    return "Telephone" in caps and "WLAN AP" not in caps and "Router" not in caps
+
+
+def _classify_evidence(data: ClassificationInput) -> Classification:
 
     reasons: list[Reason] = []
     trunk = 0.0
@@ -147,6 +209,9 @@ def classify_port(data: ClassificationInput) -> Classification:
                 if vid == 1:
                     add("neutral", "The only VLAN is VLAN 1 (default VLAN); this is common on "
                         "unconfigured access ports and is not trunk evidence.")
+        elif n_tagged == 1 and not protocol and _voice_vlan_pattern(data):
+            add("access", f"1 tagged VLAN ({tagged[0].vlan_id}) with an IP phone as the only "
+                "LLDP neighbor and at most 3 MACs: voice VLAN pattern (IP phone + PC).", 1.5)
         elif n_tagged == 1:
             add("trunk", f"1 tagged VLAN ({tagged[0].vlan_id}); consistent with a voice VLAN "
                 "(IP phone + PC) or a small trunk.", 1.0)
@@ -218,10 +283,6 @@ def classify_port(data: ClassificationInput) -> Classification:
     if data.alias and _UPLINK_WORDS.search(data.alias):
         add("trunk", f"Interface description '{data.alias}' suggests an uplink.", 2.0)
 
-    if data.switch_role in {"core", "distribution"}:
-        add("trunk", f"The switch is a {data.switch_role} switch (inventory topology role); its "
-            "ports are treated as network infrastructure.", 2.0)
-
     # --- Decision -----------------------------------------------------------------------------
     diff = trunk - access
     if data.vlans is None and not strong_trunk:
@@ -248,4 +309,8 @@ def classify_port(data: ClassificationInput) -> Classification:
     else:
         confidence = "High" if magnitude >= 5 else "Medium" if magnitude >= 3 else "Low"
         score = min(0.95, 0.5 + magnitude * 0.07)
+        if confidence == "Low":
+            add("neutral", f"Evidence leans {category.value} but the confidence is too low to "
+                "decide: reported as UNKNOWN (never a restart candidate).")
+            category = PortClass.UNKNOWN
     return Classification(category, confidence, score, round(trunk, 2), round(access, 2), reasons)

@@ -202,7 +202,7 @@ async def test_connector_concurrency_limit_and_authorized_restart(ssh_lab, firew
         strategy_spec=strategy, classification="ACCESS", confidence="High",
         declared_uplink=False, is_linkagg=False, switch_role="access", model="OS6860E-P24",
         version="8.9.221.R03", trunk_override_confirmed=False, operator_classes={"ACCESS"},
-        confirmed=True)
+        confirmed=True, discovery_status="discovered", environment="lab")
     async with connector.session(target, CTX) as fs:
         await fs.bind_profile(AOS8_PROFILE, model="OS6860E-P24", version="8.9.221.R03")
         async with fs.restart(auth) as restart:

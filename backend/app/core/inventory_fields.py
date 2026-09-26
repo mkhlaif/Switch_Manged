@@ -102,6 +102,35 @@ def aos_version(value: str) -> str:
     return value
 
 
+def expected_model(value: str) -> str:
+    """Optional metadata: compared with what discovery finds, never used to select commands."""
+    return model(value) if _plain(value, "expected_model") else ""
+
+
+def expected_aos_version(value: str) -> str:
+    return aos_version(value) if _plain(value, "expected_aos_version") else ""
+
+
+FINGERPRINT_RE = re.compile(r"^SHA256:[A-Za-z0-9+/]{43}=?$")
+ENVIRONMENT_VALUES = ("production", "lab")
+
+
+def host_key_fingerprint(value: str) -> str:
+    """Optional SSH host-key fingerprint obtained out of band (OpenSSH SHA256 format)."""
+    value = _plain(value, "ssh_host_key_fingerprint")
+    if value and not FINGERPRINT_RE.match(value):
+        raise ValueError("ssh_host_key_fingerprint must be an OpenSSH SHA256 fingerprint "
+                         "(SHA256:<43 base64 characters>).")
+    return value
+
+
+def environment(value: str) -> str:
+    value = _plain(value, "environment").lower() or "production"
+    if value not in ENVIRONMENT_VALUES:
+        raise ValueError(f"environment {value!r} must be production or lab.")
+    return value
+
+
 def switch_role(value: str) -> str:
     value = _plain(value, "role").lower() or "unknown"
     if value not in SWITCH_ROLE_VALUES:

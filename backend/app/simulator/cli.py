@@ -46,6 +46,8 @@ class SimCli:
 
     # ------------------------------------------------------------------------------------------
     def _show_system(self) -> str:
+        if self.sw.behavior.system_output:
+            return self.sw.behavior.system_output
         vendor = "Alcatel-Lucent Enterprise" if self.sw.family != "AOS6" else "Alcatel-Lucent"
         return (
             "System:\n"

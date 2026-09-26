@@ -73,9 +73,9 @@ def test_unknown_when_vlans_unavailable():
 
 def test_linkagg_and_declared_uplink_are_definitive():
     assert classify_port(ClassificationInput(port=None, is_linkagg=True, linkagg_id=5)
-                         ).category is PortClass.TRUNK
+                         ).category is PortClass.LAG
     c = classify(declared_uplink=True, vlans=[v(206, False)], mac_count=1)
-    assert c.category is PortClass.TRUNK and c.confidence_score > 0.9
+    assert c.category is PortClass.UPLINK and c.confidence_score > 0.9
 
 
 def test_uplink_description_counts_as_evidence():
@@ -85,6 +85,42 @@ def test_uplink_description_counts_as_evidence():
 
 
 def test_untagged_port_with_many_macs_is_not_plain_access():
+    # Evidence leans access, but 15 MACs (a downstream unmanaged switch?) leave the confidence
+    # Low: reported as UNKNOWN, never a restart candidate.
     c = classify(vlans=[v(10, False)], lldp=[], mac_count=15)
-    assert c.category is PortClass.LIKELY_ACCESS
+    assert c.category is PortClass.UNKNOWN and c.confidence == "Low"
     assert any("15 MAC" in r.text for r in c.reasons)
+    assert any("too low to decide" in r.text for r in c.reasons)
+
+
+def test_phone_plus_pc_voice_vlan_pattern_is_medium_confidence_access():
+    c = classify(vlans=[v(206, False), v(300, True)],
+                 lldp=[nb(["Telephone", "Bridge"], "ALE-8068s")], mac_count=2)
+    assert c.category is PortClass.LIKELY_ACCESS and c.confidence == "Medium"
+    assert any("voice VLAN pattern" in r.text for r in c.reasons)
+    # Not the pattern: a second LLDP neighbour, or too many MACs behind the phone.
+    two = classify(vlans=[v(206, False), v(300, True)],
+                   lldp=[nb(["Telephone", "Bridge"], "P1"), nb(["Bridge"], "SW")], mac_count=2)
+    assert two.category is not PortClass.LIKELY_ACCESS or two.confidence == "Low"
+    many = classify(vlans=[v(206, False), v(300, True)],
+                    lldp=[nb(["Telephone", "Bridge"], "P1")], mac_count=6)
+    assert not any("voice VLAN pattern" in r.text for r in many.reasons)
+
+
+def test_role_and_description_categories_override_the_evidence():
+    endpoint = {"vlans": [v(206, False)], "lldp": [], "mac_count": 1}
+    assert classify(**endpoint).category is PortClass.ACCESS
+    core = classify(**endpoint, switch_role="core")
+    assert core.category is PortClass.CORE and core.confidence == "High"
+    assert any("Evidence alone: ACCESS" in r.text for r in core.reasons)
+    assert classify(**endpoint, switch_role="distribution").category is PortClass.DISTRIBUTION
+    assert classify(**endpoint, alias="MGMT - OOB").category is PortClass.MANAGEMENT
+    assert classify(**endpoint, alias="VFL stacking").category is PortClass.STACK
+    assert classify(**endpoint, switch_role="access", alias="PC 204").category is         PortClass.ACCESS
+
+
+def test_low_confidence_trunk_lean_is_unknown():
+    # 1 tagged VLAN + 4 MACs, no LLDP data: leans trunk, not enough to say so.
+    c = classify(vlans=[v(10, False), v(20, True)], lldp=None, mac_count=4)
+    assert c.category is PortClass.UNKNOWN and c.confidence == "Low"
+    assert any("leans LIKELY_TRUNK" in r.text for r in c.reasons)

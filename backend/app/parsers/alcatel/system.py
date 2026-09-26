@@ -24,6 +24,9 @@ from app.parsers.common import lines, null_if_empty
 _MODEL = re.compile(r"\b(OS\d{4,5}[A-Z]?(?:-[A-Z0-9]+)*)\b")
 _VERSION = re.compile(r"\b(\d{1,2}\.\d{1,2}\.\d{1,4}(?:\.\d{1,4})?\.R\d{1,2})\b")
 _FIELD = re.compile(r"^\s*([A-Za-z &]+?)\s*:\s*(.*)$")
+_OID = re.compile(r"^\d+(?:\.\d+){3,40}$")
+_ALE_DESCRIPTION = re.compile(r"^Alcatel-Lucent(?: Enterprise)? OS\d")
+ALE_ENTERPRISE_OID = "1.3.6.1.4.1.6486"  # IANA private enterprise number of Alcatel-Lucent
 
 
 @dataclass
@@ -35,6 +38,8 @@ class SystemInfo:
     location: str | None
     contact: str | None
     uptime: str | None
+    object_id: str | None = None
+    vendor: str | None = None
 
     @property
     def major(self) -> int | None:
@@ -71,6 +76,8 @@ def parse_show_system(output: str) -> SystemInfo:
         vm = _VERSION.search(description)
         model = mm.group(1) if mm else None
         version = vm.group(1) if vm else None
+    object_id = null_if_empty(fields.get("object id", "").rstrip(","))
+    object_id = object_id if object_id and _OID.match(object_id) else None
     return SystemInfo(
         description=description,
         model=model,
@@ -79,4 +86,17 @@ def parse_show_system(output: str) -> SystemInfo:
         location=null_if_empty(fields.get("location")),
         contact=null_if_empty(fields.get("contact")),
         uptime=null_if_empty(fields.get("up time")),
+        object_id=object_id,
+        vendor=detect_vendor(description, object_id),
     )
+
+
+def detect_vendor(description: str | None, object_id: str | None) -> str | None:
+    """"ALE" only when BOTH documented signals agree: the description names Alcatel-Lucent
+    (AOS 6: "Alcatel-Lucent OS…", AOS 8: "Alcatel-Lucent Enterprise OS…") and the system object
+    id lies under ALE's enterprise number 6486. Anything else is not identified."""
+    if not description or not object_id:
+        return None
+    if _ALE_DESCRIPTION.match(description) and object_id.startswith(ALE_ENTERPRISE_OID + "."):
+        return "ALE"
+    return None

@@ -56,6 +56,11 @@ SETTING_DEFS: dict[str, SettingDef] = {
                    "validation failures within the window.", 1, 100),
         SettingDef("breaker_unexpected_output", int, "Circuit breaker: unexpected CLI responses "
                    "within the window.", 1, 100),
+        SettingDef("breaker_profile_mismatches", int, "Circuit breaker: device identity "
+                   "(model / AOS version) mismatches found by discovery within the window.",
+                   1, 100),
+        SettingDef("breaker_verification_failures", int, "Circuit breaker: restarts whose "
+                   "post-restart verification failed within the window.", 1, 100),
         SettingDef("breaker_window_minutes", int, "Circuit breaker counting window.", 1, 1440),
         SettingDef("require_lab_verification", bool, "Require an admin lab-verification record "
                    "(model family + AOS version) before profile commands run on real switches."),
@@ -87,6 +92,8 @@ def default_values() -> dict[str, Any]:
         "breaker_auth_failures": 3,
         "breaker_validation_failures": 3,
         "breaker_unexpected_output": 3,
+        "breaker_profile_mismatches": 3,
+        "breaker_verification_failures": 3,
         "breaker_window_minutes": 10,
         "require_lab_verification": True,
         "max_mac_searches_per_minute": 100,

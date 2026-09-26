@@ -39,7 +39,7 @@ async def test_multiple_locations_are_all_reported(reader):
     assert {(r["switch_name"], r["port"] or r["interface_raw"]) for r in found} == {
         ("SIM-SW-01", "1/1/26"), ("SIM-SW-02", "1/1/1"), ("SIM-SW-03", "0/1")}
     classes = {r["switch_name"]: r["classification"] for r in found}
-    assert classes == {"SIM-SW-01": "ACCESS", "SIM-SW-02": "TRUNK", "SIM-SW-03": "TRUNK"}
+    assert classes == {"SIM-SW-01": "ACCESS", "SIM-SW-02": "TRUNK", "SIM-SW-03": "LAG"}
     summary = search["summary"]
     assert summary["multiple_locations"] and len(summary["multiple_location_reasons"]) >= 5
     assert summary["likely_edge"]["switch_name"] == "SIM-SW-01"

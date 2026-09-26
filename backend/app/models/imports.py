@@ -42,6 +42,7 @@ class ImportJob(Base):
         CheckConstraint(f"status IN ({_STATUS_LIST})", name="status_valid"),
         CheckConstraint("file_format IN ('csv', 'json')", name="format_valid"),
         CheckConstraint("on_existing IN ('skip', 'update')", name="on_existing_valid"),
+        CheckConstraint("mode IN ('atomic', 'per_row')", name="mode_valid"),
     )
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
@@ -54,7 +55,11 @@ class ImportJob(Base):
     filename: Mapped[str] = mapped_column(String(255), default="")
     file_sha256: Mapped[str] = mapped_column(String(64), default="")
     on_existing: Mapped[str] = mapped_column(String(8), default="skip")
+    # atomic (default): the whole file in ONE transaction — any failing row rolls everything
+    # back; per_row: only the valid rows, each in its own transaction (explicit choice).
+    mode: Mapped[str] = mapped_column(String(8), default="atomic", server_default="atomic")
     skip_invalid: Mapped[bool] = mapped_column(Boolean, default=False)
+    discovery_job_id: Mapped[str] = mapped_column(String(36), default="", server_default="")
     cancel_requested: Mapped[bool] = mapped_column(Boolean, default=False)
 
     # preview counts

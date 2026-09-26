@@ -23,6 +23,14 @@ class PortActionStatus(str, enum.Enum):
     INTERRUPTED = "interrupted"  # backend stopped mid-action; port state must be checked by hand
 
 
+class ActionOutcome(str, enum.Enum):
+    SUCCESS = "SUCCESS"                          # executed and the postcondition verified
+    VERIFICATION_FAILED = "VERIFICATION_FAILED"  # executed, postcondition not confirmed
+    FAILED = "FAILED"                            # executed or attempted, known failure
+    UNKNOWN = "UNKNOWN"                          # state of the port not known (check by hand)
+    BLOCKED = "BLOCKED"                          # stopped before any state change
+
+
 class PortAction(Base):
     __tablename__ = "port_actions"
 
@@ -72,6 +80,11 @@ class PortAction(Base):
     reason: Mapped[str] = mapped_column(Text, default="")
     result_message: Mapped[str] = mapped_column(Text, default="")
     error_message: Mapped[str] = mapped_column(Text, default="")
+    # Final outcome of a live operation: SUCCESS | VERIFICATION_FAILED | FAILED | UNKNOWN |
+    # BLOCKED (see ActionOutcome); error_category is a safe category (core/error_categories).
+    outcome: Mapped[str] = mapped_column(String(24), default="", server_default="")
+    error_category: Mapped[str] = mapped_column(String(32), default="", server_default="")
+    profile_version: Mapped[str] = mapped_column(String(16), default="", server_default="")
 
     requested_by_id: Mapped[int | None] = mapped_column(
         ForeignKey("users.id", ondelete="SET NULL"), nullable=True

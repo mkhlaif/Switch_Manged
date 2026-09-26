@@ -50,6 +50,10 @@ async def run_read_verification(db: AsyncSession, admin: User, *, switch_id: int
     switch = await db.get(Switch, switch_id)
     if switch is None:
         raise NotFoundError("Switch not found.")
+    if switch.discovery_status != "discovered":
+        raise AppError("Verification runs only on a switch whose identity was confirmed by "
+                       f"automatic discovery (status {switch.discovery_status}). No command was "
+                       "executed.", code="DISCOVERY_REQUIRED", title="DISCOVERY REQUIRED")
     profile, reason = select_profile(await load_profiles(db), switch)
     if profile is None:
         raise AppError(f"{reason} No command was executed.", code="NO_PROFILE",
@@ -114,11 +118,16 @@ async def run_read_verification(db: AsyncSession, admin: User, *, switch_id: int
     passed = bool(exercised) and all(r["status"] == "ok" for r in exercised)
     out = {"switch": switch.name, "profile": profile.key, "model_family": family,
            "version_prefix": m.group(1), "aos_version": switch.aos_version, "port": canonical_port,
+           "transport": switch.transport, "environment": switch.environment,
+           "evidence_level": "SIMULATED" if switch.transport == "simulator" else "LAB_VERIFIED",
            "results": results, "passed": passed, "commands": commands, "recorded": False}
     await record(db, action="PROFILE_VERIFICATION_RUN", result="SUCCESS" if passed else "FAILED",
                  user=admin, ip=ip, switch_name=switch.name, port=canonical_port,
                  operation="PROFILE_VERIFICATION", profile=profile.key,
                  message=f"Read-only verification of {profile.key} on {family} AOS "
                          f"{switch.aos_version}: {'PASSED' if passed else 'FAILED'}",
-                 details={"results": results, "commands_executed": len(commands)})
+                 details={"results": results, "commands_executed": len(commands),
+                          "model_family": family, "version_prefix": m.group(1),
+                          "aos_version": switch.aos_version, "transport": switch.transport,
+                          "environment": switch.environment, "switch_id": switch.id})
     return out

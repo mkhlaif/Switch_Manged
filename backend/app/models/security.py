@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime
 
-from sqlalchemy import JSON, Integer, String, Text, UniqueConstraint
+from sqlalchemy import JSON, CheckConstraint, Integer, String, Text, UniqueConstraint
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.core.timeutil import utcnow
@@ -67,8 +67,11 @@ class CommandVerification(Base):
     real switches) or a bounce strategy id (needed before any live restart)."""
 
     __tablename__ = "command_verifications"
-    __table_args__ = (UniqueConstraint("profile_key", "capability", "model_family",
-                                       "version_prefix"),)
+    __table_args__ = (
+        UniqueConstraint("profile_key", "capability", "model_family", "version_prefix"),
+        CheckConstraint("status IN ('LAB_VERIFIED', 'PRODUCTION_VERIFIED', 'BLOCKED', "
+                        "'DEPRECATED')", name="status_valid"),
+    )
 
     id: Mapped[int] = mapped_column(Integer, primary_key=True)
     profile_key: Mapped[str] = mapped_column(String(32))
@@ -79,6 +82,15 @@ class CommandVerification(Base):
     verified_at: Mapped[datetime] = mapped_column(UTCDateTime, default=utcnow)
     notes: Mapped[str] = mapped_column(Text, default="")
     evidence: Mapped[dict] = mapped_column(JSON, default=dict)
+    # Profile state of this capability on this model family / AOS train (no record = DRAFT):
+    # LAB_VERIFIED → usable on lab switches (and for reads); PRODUCTION_VERIFIED → state
+    # changes on production switches (promotion needs recorded lab evidence); BLOCKED →
+    # refused everywhere; DEPRECATED → retired (kept for history).
+    status: Mapped[str] = mapped_column(String(20), default="LAB_VERIFIED",
+                                        server_default="LAB_VERIFIED")
+    status_changed_by: Mapped[str] = mapped_column(String(64), default="", server_default="")
+    status_changed_at: Mapped[datetime | None] = mapped_column(UTCDateTime, nullable=True)
+    status_reason: Mapped[str] = mapped_column(Text, default="", server_default="")
 
 
 class Alert(Base):
