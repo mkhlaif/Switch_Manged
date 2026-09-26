@@ -9,3 +9,21 @@ frontend/node_modules/
 frontend/dist/
 certs/*
 !certs/.gitkeep
+# Never commit environment files (only the template), databases, backups, logs or keys.
+.env.*
+!.env.example
+backups/
+*.dump
+*.sql
+*.sql.gz
+*.log
+*.sqlite
+*.sqlite3
+*.db
+*.pem
+*.key
+id_rsa*
+id_ed25519*
+.vscode/
+.idea/
+frontend/coverage/
