@@ -161,14 +161,29 @@ production.
 |---|---|
 | Repository | https://github.com/mkhlaif/Switch_Manged (public; was empty before this work) |
 | Branch | `main` (new default branch; no remote branches existed) |
-| Commits | 18 logical commits (baseline in 5 commits, audit, security, features, tests, performance, CI/scripts, UI, deployment fixes, docs, this report) |
+| Commits | 19 logical commits (baseline in 5 commits, audit, security, features, tests, performance, CI/scripts, UI, deployment fixes, docs, this report) |
 | Commit identity | `mkhlaif <267584620+mkhlaif@users.noreply.github.com>` (repo-local; GitHub noreply address so no personal e-mail is published) |
 | Secrets check | whole history scanned: no `.env`, database, dump, key, certificate or credential committed |
 | Push | see "Push result" below |
 
 ### Push result
 
-To be completed after the push attempt.
+**Not pushed yet — the repository owner's sign-in is required.** On 2026-09-26 a normal push
+(`git push -u origin main`, no force) was attempted after all checks passed; it stopped with
+`could not read Username for 'https://github.com'` because no GitHub credential is stored on the
+build machine (Git Credential Manager has no account; the attempt was run non-interactively so it
+could not open a sign-in window). No credential was created or requested on the owner's behalf.
+
+To publish, the owner runs in the project directory:
+
+```bash
+git push -u origin main
+```
+
+Git Credential Manager then opens the GitHub sign-in in the browser. The remote was empty, so
+this is a plain fast-forward push — no force, no history rewrite. Afterwards check the
+repository page (README, `docs/`, `.github/workflows/ci.yml`) and the *Actions* tab for the first
+CI run.
 
 ## 10. Known limitations
 
