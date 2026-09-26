@@ -253,6 +253,10 @@ async def test_live_restart_records_outcome_category_profile_version_and_site(
             AuditLog.action == "PORT_RESTART", AuditLog.result == "SUCCESS"))).scalars().one()
         assert (entry.site, entry.outcome, entry.profile_version) == (
             "Campus North", "SUCCESS", plan["profile_version"])
+    listed = (await admin.get("/api/audit", params={"action": "PORT_RESTART"})).json()["items"]
+    row = next(i for i in listed if i["result"] == "SUCCESS")
+    assert (row["site"], row["outcome"], row["profile_version"], row["error_category"]) == (
+        "Campus North", "SUCCESS", plan["profile_version"], "")
 
 
 async def test_discovery_jobs_api(admin, operator, lab):

@@ -460,6 +460,10 @@ class AuditOut(ORM):
     error: str = ""
     before_state: dict[str, Any] | None = None
     after_state: dict[str, Any] | None = None
+    site: str = ""
+    profile_version: str = ""
+    error_category: str = ""
+    outcome: str = ""
     target_type: str
     target_id: str
     target_label: str
@@ -477,7 +481,7 @@ class SettingsUpdate(Strict):
 
 class VerificationCreate(Strict):
     """Administrator lab-verification record (§9): a capability ("READ" or a restart strategy)
-    of a profile, verified on a model family ("*" = every supported model) and AOS version."""
+    of a profile, verified on one model family and AOS version (created LAB_VERIFIED)."""
 
     profile_key: str = Field(max_length=32)
     capability: str = Field(pattern=r"^[A-Z0-9_]{3,32}$")

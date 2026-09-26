@@ -1,11 +1,19 @@
-"""Performance test of the MAC search with controlled SSH concurrency (simulated switches).
+"""Performance test of discovery and MAC search with controlled SSH concurrency (simulated).
 
     cd backend
-    python scripts/perf_search.py --switches 10 50 100 --concurrency 5 --latency 0.05
+    python scripts/perf_search.py --switches 10 50 100 500 --concurrency 5 --latency 0.05
+    python scripts/perf_search.py --scenario discovery --switches 10 50 100 500
 
 For each inventory size N the script builds N simulated OmniSwitches (AOS 8 access switches,
-the searched MAC present on exactly one of them), runs one real MAC search through the normal
-service code (firewall, profiles, parsers, classification, database), and reports:
+the searched MAC present on exactly one of them) and runs, through the normal service code
+(firewall, profiles, parsers, classification, database), one of:
+
+* ``search`` — a MAC search over switches that were already discovered;
+* ``first-search`` — a MAC search over switches that were never discovered (each switch is
+  identified with the discovery command first, in the same SSH session);
+* ``discovery`` — a background discovery job over every switch.
+
+It reports:
 
 * wall-clock search time,
 * process CPU time and peak resident memory (psutil),
@@ -52,7 +60,7 @@ from sqlalchemy import event, select  # noqa: E402
 MAC = "001122334455"
 
 
-async def run(n: int, concurrency: int, latency: float, mode: str) -> dict:
+async def run(n: int, concurrency: int, latency: float, mode: str, scenario: str) -> dict:
     from app.core.config import get_settings
     from app.core.crypto import encrypt_secret
     from app.core.logging import configure_logging
@@ -62,6 +70,7 @@ async def run(n: int, concurrency: int, latency: float, mode: str) -> dict:
     from app.models import Credential, MacSearch, Role, Switch, User
     from app.security.circuit_breaker import init_breaker
     from app.security.firewall import init_firewall
+    from app.services.discovery.service import create_job
     from app.services.mac_search.service import start_search
     from app.services.ssh import manager
     from app.simulator import session as sim_session
@@ -97,9 +106,16 @@ async def run(n: int, concurrency: int, latency: float, mode: str) -> dict:
                           password_encrypted=encrypt_secret(SIM_PASSWORD))
         db.add(cred)
         await db.flush()
+        identified = scenario == "search"
         for name, sw in fleet.items():
-            db.add(Switch(name=name, host=name, transport="simulator", model=sw.model,
-                          aos_version=sw.version, credential_id=cred.id, role="access"))
+            # The identity only ever comes from discovery: "search" starts from switches that
+            # were discovered before; the other scenarios start from an empty identity.
+            db.add(Switch(name=name, host=name, transport="simulator", role="access",
+                          model=sw.model if identified else "",
+                          aos_version=sw.version if identified else "",
+                          vendor="ALE" if identified else "",
+                          discovery_status="discovered" if identified else "not_discovered",
+                          credential_id=cred.id))
         user = User(username="perf", full_name="Perf", role=Role.READONLY.value,
                     password_hash=hash_password("Perf-Passw0rd!!"))
         db.add(user)
@@ -144,19 +160,34 @@ async def run(n: int, concurrency: int, latency: float, mode: str) -> dict:
     cpu0, t0 = time.process_time(), time.perf_counter()
     async with session_factory()() as db:
         user = (await db.execute(select(User))).scalar_one()
-        search = await start_search(db, user, MAC, mode=mode)
-        search_id = search.id
+        if scenario == "discovery":
+            ids = list((await db.execute(select(Switch.id))).scalars())
+            job_id = (await create_job(db, user, ids, source="perf")).id
+        else:
+            search_id = (await start_search(db, user, MAC, mode=mode)).id
     await asyncio.gather(*tasks.running())
     elapsed = time.perf_counter() - t0
     cpu = time.process_time() - cpu0
     stop = True
     await sampler
     async with session_factory()() as db:
-        s = await db.get(MacSearch, search_id)
-        result = {"switches": n, "mode": mode, "concurrency_limit": concurrency,
-                  "latency_per_command_s": latency, "status": s.status,
-                  "found": s.found_count, "failed": s.failed_count, "timeout": s.timeout_count,
-                  "search_time_s": round(elapsed, 2), "cpu_time_s": round(cpu, 2),
+        discovered = len(list((await db.execute(select(Switch.id).where(
+            Switch.discovery_status == "discovered"))).scalars()))
+        if scenario == "discovery":
+            from app.models import DiscoveryJob
+
+            job = await db.get(DiscoveryJob, job_id)
+            status, found, failed, timeout = job.status, None, job.failed, 0
+        else:
+            s = await db.get(MacSearch, search_id)
+            status, found, failed, timeout = (s.status, s.found_count, s.failed_count,
+                                              s.timeout_count)
+        result = {"scenario": scenario, "switches": n, "mode": mode,
+                  "concurrency_limit": concurrency,
+                  "latency_per_command_s": latency, "status": status,
+                  "found": found, "failed": failed, "timeout": timeout,
+                  "discovered_switches": discovered,
+                  "time_s": round(elapsed, 2), "cpu_time_s": round(cpu, 2),
                   "peak_rss_mb": round(peak_rss / 2**20, 1),
                   "peak_concurrent_sessions": peak_sessions,
                   "sql_statements": statements,
@@ -172,17 +203,23 @@ def main() -> int:
     parser.add_argument("--concurrency", type=int, default=5)
     parser.add_argument("--latency", type=float, default=0.05)
     parser.add_argument("--mode", default="STANDARD", choices=["FAST", "STANDARD"])
+    parser.add_argument("--scenario", default="search",
+                        choices=["search", "first-search", "discovery"])
     args = parser.parse_args()
     results = []
     for n in args.switches:
-        r = asyncio.run(run(n, args.concurrency, args.latency, args.mode))
+        r = asyncio.run(run(n, args.concurrency, args.latency, args.mode, args.scenario))
         results.append(r)
-        ok = (r["status"] == "completed" and r["found"] == 1 and r["failed"] == 0
-              and r["peak_concurrent_sessions"] <= args.concurrency)
-        print(json.dumps({**r, "check": "PASS" if ok else "FAIL"}))
-    bad = [r for r in results if r["peak_concurrent_sessions"] > args.concurrency
-           or r["status"] != "completed" or r["found"] != 1]
-    return 1 if bad else 0
+        print(json.dumps({**r, "check": "PASS" if _ok(r, args.concurrency) else "FAIL"}))
+    return 0 if all(_ok(r, args.concurrency) for r in results) else 1
+
+
+def _ok(r: dict, concurrency: int) -> bool:
+    if r["peak_concurrent_sessions"] > concurrency or r["status"] != "completed":
+        return False
+    if r["scenario"] == "discovery":
+        return r["failed"] == 0 and r["discovered_switches"] == r["switches"]
+    return r["found"] == 1 and r["failed"] == 0 and r["discovered_switches"] == r["switches"]
 
 
 if __name__ == "__main__":
