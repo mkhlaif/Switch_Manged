@@ -299,21 +299,21 @@ async def test_zabbix_client_allowlist_and_bearer_token():
 # ---------------------------------------------------------------------- user management ---
 async def test_admin_user_management_and_force_logout(admin, make_client):
     created = await admin.post("/api/users", json={
-        "username": "john", "password": "John-Passw0rd!!", "role": "mac_operator"})
+        "username": "test-macop", "password": "Test-MacOp-Passw0rd!!", "role": "mac_operator"})
     assert created.status_code == 201 and created.json()["role"] == "mac_operator"
-    john = await make_client()
-    assert (await john.login("john", "John-Passw0rd!!")).status_code == 200
+    macuser = await make_client()
+    assert (await macuser.login("test-macop", "Test-MacOp-Passw0rd!!")).status_code == 200
     users = {u["username"]: u for u in (await admin.get("/api/users")).json()}
-    assert users["john"]["active_sessions"] == 1 and users["john"]["last_login_at"]
-    resp = await admin.post(f"/api/users/{users['john']['id']}/logout")
+    assert users["test-macop"]["active_sessions"] == 1 and users["test-macop"]["last_login_at"]
+    resp = await admin.post(f"/api/users/{users['test-macop']['id']}/logout")
     assert resp.json()["sessions_terminated"] == 1
-    assert (await john.get("/api/auth/me")).status_code == 401
+    assert (await macuser.get("/api/auth/me")).status_code == 401
     # Changing the role also ends the sessions (fresh login, new interface).
-    await john.login("john", "John-Passw0rd!!")
-    await admin.patch(f"/api/users/{users['john']['id']}", json={"role": "readonly"})
-    assert (await john.get("/api/auth/me")).status_code == 401
+    await macuser.login("test-macop", "Test-MacOp-Passw0rd!!")
+    await admin.patch(f"/api/users/{users['test-macop']['id']}", json={"role": "readonly"})
+    assert (await macuser.get("/api/auth/me")).status_code == 401
     rows = (await admin.get("/api/audit", params={"action": "USER_FORCE_LOGOUT"})).json()
-    assert rows["items"][0]["target_label"] == "john"
+    assert rows["items"][0]["target_label"] == "test-macop"
 
 
 # ---------------------------------------------------------------- lab verification run ---

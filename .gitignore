@@ -27,3 +27,20 @@ id_ed25519*
 .vscode/
 .idea/
 frontend/coverage/
+
+# Generic build/runtime artefacts and certificate/key stores (nothing tracked matches these).
+node_modules/
+dist/
+build/
+coverage/
+htmlcov/
+.coverage
+.venv/
+venv/
+*.crt
+*.p12
+*.pfx
+*.bak
+*.db-wal
+*.db-shm
+*.pid

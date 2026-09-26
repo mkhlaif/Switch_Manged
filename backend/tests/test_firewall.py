@@ -649,7 +649,7 @@ async def test_session_max_duration(monkeypatch):
 
 
 # ---------------------------------------------------------------------- MAC_OPERATOR ---
-MACOP = ExecutionContext(9, "john", Role.MAC_OPERATOR, "TEST")
+MACOP = ExecutionContext(9, "test-macop", Role.MAC_OPERATOR, "TEST")
 
 
 async def test_mac_operator_only_confident_access_ports():

@@ -24,7 +24,7 @@ describe("interface separation (§78)", () => {
   it("renders the simplified screen for a MAC_OPERATOR, without the admin navigation", async () => {
     get.mockImplementation((path: string) =>
       path === "/api/auth/me"
-        ? Promise.resolve({ user: { id: 9, username: "john", full_name: "John", role: "mac_operator", interface: "simple", permissions: ["simple_restart", "simple_search"] }, csrf_token: "x" })
+        ? Promise.resolve({ user: { id: 9, username: "test-macop", full_name: "Test Operator", role: "mac_operator", interface: "simple", permissions: ["simple_restart", "simple_search"] }, csrf_token: "x" })
         : Promise.reject(new Error(`unexpected request ${path}`)),
     );
     render(<App />);

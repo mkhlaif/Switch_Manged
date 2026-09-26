@@ -10,7 +10,7 @@ vi.mock("../api/client", () => ({
   ApiError: class extends Error {},
 }));
 vi.mock("../auth/AuthContext", () => ({
-  useAuth: () => ({ user: { username: "john", full_name: "John", role: "mac_operator" }, logout: vi.fn() }),
+  useAuth: () => ({ user: { username: "test-macop", full_name: "Test Operator", role: "mac_operator" }, logout: vi.fn() }),
 }));
 
 import SimpleApp from "./SimpleApp";
