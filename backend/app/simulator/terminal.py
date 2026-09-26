@@ -50,8 +50,18 @@ class SimTerminal:
         self._out.put_nowait("")
 
     def feed(self, data: str) -> None:
+        # Echo is batched per write, as an SSH server delivers it (one chunk, not one per
+        # character); ordering relative to the command output is preserved.
+        echo: list[str] = []
+
+        def flush_echo() -> None:
+            if echo:
+                self._emit("".join(echo))
+                echo.clear()
+
         for ch in data:
             if self._pages is not None:
+                flush_echo()
                 if ch in " \r\n":
                     self._next_page()
                 elif ch.lower() == "q":
@@ -59,6 +69,7 @@ class SimTerminal:
                     self._emit("\r\n" + self.prompt)
                 continue
             if ch in "\r\n":
+                flush_echo()
                 line, self._line = self._line, ""
                 self._emit("\r\n")
                 self._handle(line)
@@ -66,7 +77,8 @@ class SimTerminal:
                 self._line = self._line[:-1]
             else:
                 self._line += ch
-                self._emit(ch)  # echo
+                echo.append(ch)  # echo
+        flush_echo()
 
     def _handle(self, line: str) -> None:
         if not line.strip():
