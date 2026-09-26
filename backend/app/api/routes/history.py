@@ -9,6 +9,7 @@ from fastapi.responses import StreamingResponse
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.csv_safe import csv_cell
 from app.core.permissions import Permission
 from app.api.deps import require
 from app.core.errors import ValidationFailedError
@@ -99,6 +100,6 @@ async def export_history(mac: str | None = None, user: str | None = None,
     writer = csv.DictWriter(buf, fieldnames=fields, extrasaction="ignore")
     writer.writeheader()
     for row in rows:
-        writer.writerow(row)
+        writer.writerow({k: csv_cell(v) for k, v in row.items()})
     return StreamingResponse(iter([buf.getvalue()]), media_type="text/csv", headers={
         "Content-Disposition": "attachment; filename=mac-search-history.csv"})

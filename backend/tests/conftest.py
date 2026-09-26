@@ -22,6 +22,9 @@ os.environ.update({
     "SSH_COMMAND_TIMEOUT": "2",
     "SSH_CONNECT_RETRIES": "0",
     "SSH_SWITCH_BUDGET_SECONDS": "20",
+    # Fresh installs default to DISABLED (kill switch); the test lab enables execution
+    # explicitly, exactly like an administrator would after validation.
+    "NETWORK_COMMAND_EXECUTION": "ENABLED",
     "INITIAL_ADMIN_USERNAME": "",
     "INITIAL_ADMIN_PASSWORD": "",
     "LOG_LEVEL": "INFO",

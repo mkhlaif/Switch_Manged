@@ -10,6 +10,7 @@ from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 from sqlalchemy.orm import selectinload
 
+from app.core.config import get_settings
 from app.core.errors import AuthenticationError, PermissionDeniedError
 from app.core.security import CSRF_HEADER, SESSION_COOKIE, hash_token, tokens_equal
 from app.core.timeutil import utcnow
@@ -35,6 +36,12 @@ async def get_current_user(request: Request, db: AsyncSession = Depends(get_db))
     now = utcnow()
     if session is None or session.expires_at < now:
         raise AuthenticationError("Your session has expired. Please sign in again.")
+    idle = timedelta(minutes=get_settings().session_idle_minutes)
+    if now - session.last_seen_at > idle:
+        await db.delete(session)
+        await db.commit()
+        raise AuthenticationError("Your session ended after a period of inactivity. Please "
+                                  "sign in again.")
     user = session.user
     if not user.is_active:
         raise AuthenticationError("This account is disabled.")

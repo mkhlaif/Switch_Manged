@@ -10,6 +10,7 @@ from fastapi.responses import StreamingResponse
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.csv_safe import csv_row
 from app.core.permissions import Permission
 from app.api.deps import require
 from app.db.session import get_db
@@ -71,8 +72,8 @@ async def export_audit(action: str | None = None, user: str | None = None,
     writer.writerow(["time", "user", "action", "result", "severity", "switch", "port", "mac",
                      "message", "ip", "details"])
     for r in rows:
-        writer.writerow([r.ts.isoformat(), r.username, r.action, r.result, r.severity,
-                         r.switch_name, r.port,
-                         r.mac, r.message, r.ip, json.dumps(r.details, default=str)])
+        writer.writerow(csv_row([r.ts.isoformat(), r.username, r.action, r.result, r.severity,
+                                 r.switch_name, r.port, r.mac, r.message, r.ip,
+                                 json.dumps(r.details, default=str)]))
     return StreamingResponse(iter([buf.getvalue()]), media_type="text/csv", headers={
         "Content-Disposition": "attachment; filename=audit-log.csv"})

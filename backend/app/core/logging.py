@@ -42,7 +42,9 @@ class RedactingFilter(logging.Filter):
             message = record.getMessage()
         except Exception:  # pragma: no cover - malformed record; let logging report it
             return True
-        cleaned = redact(message)
+        # One record = one line: escape CR/LF so user-supplied text (e.g. a login name) cannot
+        # forge additional log lines. Tracebacks are formatted separately and unaffected.
+        cleaned = redact(message).replace("\r", "\\r").replace("\n", "\\n")
         if cleaned != message:
             record.msg = cleaned
             record.args = None

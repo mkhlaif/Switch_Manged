@@ -77,6 +77,16 @@ async def update_user(user_id: int, body: UserUpdate, request: Request,
     if user is None:
         raise NotFoundError("User not found.")
     changes = body.model_dump(exclude_unset=True)
+    if user.id == admin.id and (
+            ("role" in changes and changes["role"] is not None
+             and changes["role"].value != user.role)
+            or changes.get("is_active") is False):
+        await record(db, action="USER_UPDATE", result="DENIED", severity="WARNING", user=admin,
+                     ip=client_ip(request), target_type="user", target_id=user.id,
+                     target_label=user.username,
+                     message="Attempt to change own role or disable own account")
+        raise ValidationFailedError("You cannot change your own role or disable your own "
+                                    "account. Ask another administrator.")
     demoting = ("role" in changes and changes["role"] != Role.ADMIN) or changes.get("is_active") is False
     if user.role == Role.ADMIN.value and demoting and await _admin_count(db) <= 1:
         raise ValidationFailedError("At least one active administrator must remain.")

@@ -5,7 +5,7 @@ from __future__ import annotations
 import uuid
 from contextlib import asynccontextmanager
 
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, Request, Response
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
@@ -168,14 +168,27 @@ def create_app() -> FastAPI:
                       "changes were made by this request.", reference=ref)
 
     @app.get("/api/health", tags=["health"])
-    async def health() -> dict:
-        async with session_factory()() as db:
-            await db.execute(text("SELECT 1"))
+    @app.get("/health", tags=["health"], include_in_schema=False)
+    async def health(response: Response) -> dict:
+        """Liveness/readiness without authentication. Never returns connection strings,
+        credentials or configuration values."""
+        database = "ok"
+        try:
+            async with session_factory()() as db:
+                await db.execute(text("SELECT 1"))
+        except Exception:  # noqa: BLE001 - reported as unavailable, details only in the log
+            log.exception("Health check: database unavailable")
+            database = "unavailable"
         firewall = get_firewall()
-        return {"status": "ok" if firewall.ready else "degraded",
-                "running_tasks": len(tasks.running()),
-                "safety_firewall": {"ready": firewall.ready,
-                                    "policy_digest": firewall.digest[:16]}}
+        if database != "ok":
+            status = "unhealthy"
+            response.status_code = 503
+        else:
+            status = "healthy" if firewall.ready else "degraded"
+        return {"status": status, "database": database,
+                "safety_firewall": "ok" if firewall.ready else "failed",
+                "policy_digest": firewall.digest[:16],
+                "running_tasks": len(tasks.running())}
 
     for module in (auth, users, credentials, switches, mac, history, ports, audit, settings,
                    profiles, dashboard, operations, safety, alerts, integrations, simple):

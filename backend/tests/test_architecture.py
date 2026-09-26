@@ -104,7 +104,7 @@ def test_simple_api_has_no_direct_switch_access():
 
 
 def test_every_api_route_is_authenticated_and_permission_checked():
-    public = {("POST", "/api/auth/login"), ("GET", "/api/health")}
+    public = {("POST", "/api/auth/login"), ("GET", "/api/health"), ("GET", "/health")}
     from app.main import create_app
 
     for route in create_app().routes:

@@ -49,8 +49,7 @@ NOT_FOUND = "Device Not Found. Please check the MAC address and try again."
 MULTIPLE = "Multiple locations detected. Please contact IT support."
 CANNOT_RESTART = "This device cannot be restarted automatically. Please contact IT support."
 RESTART_OK = "Device restarted successfully."
-RESTART_NOT_BACK = ("The device was restarted but has not reconnected yet. If it does not work "
-                    "in a few minutes, please contact IT support.")
+RESTART_NOT_BACK = "The device could not be verified after restart. Please contact IT support."
 RESTART_FAILED = "The device could not be restarted. Please contact IT support."
 INVALID_MAC = "Please enter a valid MAC address."
 SEARCH_MAX_AGE = timedelta(minutes=10)

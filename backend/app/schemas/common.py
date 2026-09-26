@@ -26,8 +26,8 @@ class LoginRequest(Strict):
 
 
 class ChangePasswordRequest(Strict):
-    current_password: str
-    new_password: str
+    current_password: str = Field(max_length=256)
+    new_password: str = Field(max_length=256)
 
 
 class UserOut(ORM):
@@ -43,7 +43,7 @@ class UserOut(ORM):
 class UserCreate(Strict):
     username: str = Field(pattern=r"^[a-zA-Z0-9._-]{3,64}$")
     full_name: str = Field(default="", max_length=128)
-    password: str
+    password: str = Field(max_length=256)
     role: Role = Role.READONLY
 
 
@@ -51,7 +51,7 @@ class UserUpdate(Strict):
     full_name: str | None = Field(default=None, max_length=128)
     role: Role | None = None
     is_active: bool | None = None
-    password: str | None = None
+    password: str | None = Field(default=None, max_length=256)
 
 
 # ---------------------------------------------------------------- credentials --------------

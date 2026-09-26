@@ -24,6 +24,8 @@ class Settings(BaseSettings):
 
     # --- Web session security -------------------------------------------------------------------
     session_ttl_minutes: int = 480
+    # Sessions unused for this long are ended (in addition to the absolute lifetime above).
+    session_idle_minutes: int = Field(default=60, ge=5, le=1440)
     cookie_secure: bool = True
     # Comma-separated list; only needed when the UI is served from a different origin (dev).
     cors_origins: str = ""
@@ -60,7 +62,9 @@ class Settings(BaseSettings):
     # recommended initial production state. Read-only operations are unaffected.
     read_only_mode: bool = False
     # ENABLED | DISABLED. DISABLED forces the kill switch ("STOP ALL NETWORK OPERATIONS").
-    network_command_execution: str = "ENABLED"
+    # Fresh installs: DISABLED (kill switch engaged). Only exactly "ENABLED" allows
+    # state-changing commands; any other value keeps them blocked (fail closed).
+    network_command_execution: str = "DISABLED"
     # Initial SSH-failure threshold of the circuit breaker (runtime setting afterwards).
     circuit_breaker_threshold: int = Field(default=5, ge=1, le=100)
 

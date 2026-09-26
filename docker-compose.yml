@@ -57,7 +57,7 @@ services:
       # Command Safety Firewall: read-only by default (RESTART_PORT blocked) until you opt in.
       READ_ONLY_MODE: ${READ_ONLY_MODE:-true}
       # DISABLED forces the kill switch (STOP ALL NETWORK OPERATIONS) regardless of the UI.
-      NETWORK_COMMAND_EXECUTION: ${NETWORK_COMMAND_EXECUTION:-ENABLED}
+      NETWORK_COMMAND_EXECUTION: ${NETWORK_COMMAND_EXECUTION:-DISABLED}
       CIRCUIT_BREAKER_THRESHOLD: ${CIRCUIT_BREAKER_THRESHOLD:-5}
       # Read-only integrations (optional). Use read-only API tokens.
       NETBOX_URL: ${NETBOX_URL:-}
@@ -93,6 +93,12 @@ services:
     volumes:
       # For NGINX_SITE=https.conf place tls.crt and tls.key in ./certs
       - ./certs:/etc/nginx/certs:ro
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:8080/"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
 
   # Lab only: simulated OmniSwitches reachable over REAL SSH (host sim-ssh, ports 2201-2207,
   # user lab / lab-password). Never enable on a production network.
