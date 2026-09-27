@@ -29,7 +29,8 @@ Searches and read-only views always work, whatever the indicator shows.
 | **Deep** | Standard + the list of MACs on the port; only on 1–5 switches you select |
 
 Progress is live. The result shows every location: switch, port, VLAN, status, MAC count, LLDP
-neighbour and the **classification** (ACCESS, LIKELY ACCESS, UNKNOWN, LIKELY TRUNK, TRUNK) with
+neighbour and the **classification** (ACCESS, LIKELY ACCESS, UNKNOWN, LIKELY TRUNK, TRUNK,
+UPLINK, LINK AGGREGATE, CORE, DISTRIBUTION, MANAGEMENT, STACK) with
 the evidence. When the MAC is seen on several switches (normal: every switch on the path learns
 it), the likely edge port is highlighted, the possible causes are listed, and the **network path**
 (`Device → access switch port → distribution → core`) is drawn from LLDP evidence. Nothing is
@@ -57,9 +58,12 @@ separately (operators and administrators only).
 5. After the restart you see port state, MAC relearned (or *WARNING: MAC has not been
    relearned*), VLAN, and the **change report** (before/after).
 
-Blocked by design: UNKNOWN ports, declared uplinks, link aggregates, TRUNK / LIKELY TRUNK ports
-and every port of a core/distribution switch (only administrators in EMERGENCY mode), and ports
-that are administratively disabled (a restart would enable them). Outside MAINTENANCE mode, or
+Blocked by design: UNKNOWN ports (including evidence with Low confidence), UPLINK (declared
+uplinks), LINK AGGREGATE, MANAGEMENT and STACK ports (never), TRUNK / LIKELY TRUNK ports and every
+port of a core/distribution switch (only administrators in EMERGENCY mode), ports that are
+administratively disabled (a restart would enable them), and every port of a switch whose
+identity is not confirmed by automatic discovery (not discovered, discovery failed, identity
+mismatch). Outside MAINTENANCE mode, or
 with dry run on, restarts are only simulated.
 
 ## Other pages

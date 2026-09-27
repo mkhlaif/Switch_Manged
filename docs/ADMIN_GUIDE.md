@@ -14,23 +14,35 @@ Installation: [DEPLOYMENT.md](DEPLOYMENT.md).
 | Site, location | where the switch is; shown to MAC operators when no port location is set |
 | Device locations per port | one line per port, e.g. `1/1/5 = Building A - Floor 2 - Office 204` — the only location MAC operators see |
 | Credential | from *Settings → Credentials* (stored encrypted, never shown again) |
-| Model / AOS version | leave empty and use **Detect model / AOS** (`show system` only) |
-| Command profile | *Automatic* selects the profile by exact model family and AOS version |
+| Expected model / AOS version (optional) | metadata only — compared with what discovery finds; a difference blocks restarts. The model and AOS version themselves are **never typed in** |
+| Expected SSH host-key fingerprint (optional) | `SHA256:…` read on the switch console; when the switch presents exactly this key it is trusted and discovery starts automatically |
+| Environment | `production` (restarts need PRODUCTION_VERIFIED profiles) or `lab` (LAB_VERIFIED is enough) |
+| Command profile | *Automatic* selects the profile from the **discovered** model family and AOS version |
 | Topology role | access / distribution / core / unknown — ports of core and distribution switches are never restarted outside EMERGENCY mode; MAC operators can restart only on **access** switches |
-| Uplink / trunk ports | always classified TRUNK, never restartable |
+| Uplink / trunk ports | always classified UPLINK, never restartable |
 | Legacy SSH algorithms | only for old AOS 6 switches that need them |
 
 Then on the switch page: **Fetch host key** → compare the SHA-256 fingerprint with the switch
-console → type the last 8 characters → **Trust this key**; **Test SSH connection**; **Detect model
-/ AOS**. A changed host key is refused until an administrator trusts the new one — find out why
-first. The NetBox and Zabbix panels compare the inventory with those systems (read-only).
+console → type the last 8 characters → **Trust this key**. Discovery then runs automatically; the
+*Device identity* card shows the result (**Run discovery** repeats it). A changed host key is
+refused until an administrator trusts the new one — find out why first. The NetBox and Zabbix
+panels compare the inventory (IP, model, role, site, interface VLANs) with those systems
+(read-only).
+
+**Identity mismatch** (the device differs from the expected metadata or from what was discovered
+before, e.g. after an AOS upgrade or a replaced switch): read-only operations continue, restarts
+are blocked. Check the switch, then **Review and accept identity** with a reason (audited).
+*Switches → Discover all* re-identifies every enabled switch in the background. Details:
+[DISCOVERY.md](DISCOVERY.md).
 
 ## Bulk import and export
 
 *Switches → Import* adds or updates many switches from a CSV or JSON file (validation → preview
-→ confirmation → background import with progress); *Export CSV / Export JSON* downloads the
-inventory without any secret. Passwords are never part of these files: create the credential
-first and reference it by name. Full description: [SWITCH_IMPORT_EXPORT.md](SWITCH_IMPORT_EXPORT.md).
+→ confirmation → background import → automatic discovery). By default an import is all or
+nothing; row-by-row is an explicit choice. *Export CSV / Export JSON* downloads the inventory
+without any secret. Passwords are never part of these files: create the credential first and
+reference it by name (`credential_reference`). Full description:
+[SWITCH_IMPORT_EXPORT.md](SWITCH_IMPORT_EXPORT.md).
 
 ## Users and roles
 
@@ -69,16 +81,25 @@ shown to them as *"could not be verified"*; the verification details are in *Por
 
 ## Command profiles and lab verification
 
-*Settings → Command profiles* lists every command per profile with source, output contract and
-verification. Before production use, per model family and AOS version:
+*Settings → Command profiles* lists the Discovery Profile Registry and every command per
+profile with source, output contract and evidence level. Each capability has a **profile state**
+per model family and AOS version: DRAFT (no record) → LAB_VERIFIED → PRODUCTION_VERIFIED, or
+BLOCKED / DEPRECATED ([ALCATEL_COMMAND_PROFILES.md](ALCATEL_COMMAND_PROFILES.md)). Before use, per
+model family and AOS version:
 
-1. **Run read-only verification on a lab switch…** → *Run checks* → *Record READ verification*.
+1. **Run read-only verification on a lab switch…** (a real, discovered switch) → *Run checks* →
+   *Record READ as LAB_VERIFIED*. Simulator runs are never recorded.
 2. For each restart strategy you want to use, follow
    [DEPLOYMENT.md § Production enablement](DEPLOYMENT.md#5-production-enablement) and **Record**
-   it.
+   it (LAB_VERIFIED): restarts then work on switches marked `environment = lab`.
+3. **Production switches** need PRODUCTION_VERIFIED: open the record's `⋯` menu → *Change
+   state*. The server refuses unless the evidence exists — a passed verification run (READ) or a
+   live restart with a successful post-restart verification (strategy) on a real SSH switch of
+   that family and version.
 
-Revoking a record (×) immediately stops that capability for that family/version. Custom
-profiles (Clone) can only choose among allowlisted templates and start disabled.
+`⋯` → *BLOCKED* stops a capability everywhere at once; *DEPRECATED* revokes it (history kept).
+Every change needs a reason and is audited. Custom profiles (Clone) can only choose among
+allowlisted templates and start disabled.
 
 ## MAC search, port inspection, restart workflow
 

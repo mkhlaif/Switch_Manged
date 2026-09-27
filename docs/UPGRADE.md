@@ -46,6 +46,34 @@ backend is stopped.
 Tested: published version with data → backup → new code → `docker compose up -d --build` →
 migration 0003 → 0004 on PostgreSQL, `alembic check` clean, all data and search history kept.
 
+### Upgrading to the release with automatic discovery (migration 0005)
+
+- **Every switch starts "not discovered".** The model and AOS version that were typed in are
+  moved to *expected model / expected AOS version* (metadata only); the identity is then read from
+  the device. Undiscovered switches are identified automatically on the first MAC search (one
+  extra `show system` each), or run *Switches → Discover all* right after the upgrade. No port
+  query, verification run or restart is possible on a switch before it is discovered.
+- A switch whose device differs from what was typed in becomes **Identity mismatch** and blocks
+  restarts until an administrator reviews it (*switch page → Review and accept identity*).
+- Existing verification records become **LAB_VERIFIED**. Records for "all models" (`*`) count as
+  LAB_VERIFIED at most; records with a single-component version (e.g. `8`) no longer count.
+  **Restarts on production switches now need PRODUCTION_VERIFIED records**, which require recorded
+  evidence from a real switch ([ALCATEL_COMMAND_PROFILES.md](ALCATEL_COMMAND_PROFILES.md)). Mark
+  lab switches `environment = lab` (switch form or import) where LAB_VERIFIED is enough.
+- The import format changed: `model` / `aos_version` are optional (expected metadata);
+  `credential_reference`, `ssh_host_key_fingerprint` and `environment` were added; the default
+  import mode is all-or-nothing ([SWITCH_IMPORT_EXPORT.md](SWITCH_IMPORT_EXPORT.md)). Old files
+  still import.
+- Rolling back to 0004 (`alembic downgrade 0004`) restores the typed model / version from the
+  expected metadata and drops the discovery data.
+
+Tested on SQLite: 0004 with data → 0005 (identity moved, triggers kept, integrity and foreign-key
+checks clean) → 0004 (typed values restored) → 0005 (`tests/test_db_schema.py`, and the
+development database). Tested on PostgreSQL 16: published version with data → backup → this
+release (migration 0005, `alembic check` clean, users / search results / verification records
+kept, audit triggers firing) → *Discover all* without mismatch → `alembic downgrade 0004` with the
+old code running → upgrade again.
+
 ## Rollback
 
 A new version may have changed the database schema. The old code refuses to start on a newer

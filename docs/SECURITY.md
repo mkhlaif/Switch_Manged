@@ -21,6 +21,21 @@ Exactly two kinds of things, and nothing else:
    `interfaces … admin down/up` on AOS 6) or a PoE power cycle (`lanpower …`). Only for a port
    that passed every check, after an explicit confirmation by the person who requested it.
 
+Before either, the device must be **identified by automatic discovery** ([DISCOVERY.md](DISCOVERY.md)):
+the model and AOS version come only from the device (`show system`, vendor = description AND
+enterprise OID), never from what someone typed. Fail-closed properties enforced in code and tests:
+
+| Condition | Consequence |
+|---|---|
+| Unknown device / AOS (not discovered, discovery failed, identity mismatch) | no state-changing operation (port_control and the firewall both refuse) |
+| Unknown command profile | no execution (not even reads) |
+| Unknown port type (UNKNOWN, incl. Low-confidence LIKELY_*) | no restart, for every role |
+| UPLINK, LAG, MANAGEMENT, STACK | no restart, for every role |
+| TRUNK / LIKELY_TRUNK / CORE / DISTRIBUTION | administrator in EMERGENCY mode with two phrases only |
+| Profile not PRODUCTION_VERIFIED | no restart on a production switch (LAB_VERIFIED only on lab switches / simulator) |
+| Device identity changed between discovery / confirmation and execution | restart aborted before the down command (identity re-read in the execution session) |
+| Safety check / verification failure | blocked; never retried blindly; repeated failures trip the circuit breaker |
+
 There is no configuration change, no VLAN change, no `write memory`, no reload and no free-text
 CLI anywhere: not in the UI, not in the API, not in the code. Every network operation passes
 *authorization → operation policy → Command Safety Firewall → AOS command profile → validator →
@@ -234,6 +249,10 @@ There is no AI component. No AI may ever hold SSH access or call the operation A
 static test fails if an LLM SDK is imported.
 
 ## 13. Known gaps (by design or not yet implemented)
+
+- Discovery, command profiles and restarts were tested against the simulator and documented
+  output fixtures only — **not against real Alcatel-Lucent hardware**. No capability is
+  LAB_VERIFIED or PRODUCTION_VERIFIED by this project.
 
 - No multi-factor authentication and no SSO/LDAP integration.
 - Rate limits and the live-progress broker are in-memory: the backend must run as **one** process

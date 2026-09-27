@@ -22,18 +22,26 @@ Two separate experiences:
 
 ## Features
 
+- **Automatic device discovery**: add a switch by IP + credential; vendor, model and AOS version
+  are read from the device (`show system`, Discovery Profile Registry) and the command profile is
+  chosen from them. Typed model / version is only *expected metadata*; a changed device becomes
+  an identity mismatch that blocks restarts. See [docs/DISCOVERY.md](docs/DISCOVERY.md).
 - MAC search across all switches (any common MAC format), with FAST / STANDARD / DEEP modes and
   bounded SSH concurrency.
 - Port inspection: admin/operational state, speed, duplex, description, VLANs, MACs, LLDP,
-  error/drop/traffic counters, **access/trunk classification with evidence**.
+  error/drop/traffic counters, **port classification with evidence** (access, likely access,
+  unknown, trunk, uplink, link aggregate, core, distribution, management, stack).
 - Controlled port restart (link bounce or PoE power cycle): re-check, typed confirmation
   `RESTART PORT <port>`, pre-restart re-verification, locks, post-restart verification, change
   report.
 - Simplified MAC_OPERATOR workflow (backend-enforced, not just hidden buttons): location only,
   direct restart of a verified endpoint port with an automatic multi-signal safety check, fresh
   re-verification before and after the restart.
-- Bulk switch import (CSV / JSON, validated preview, background batches, idempotent) and export
-  (CSV / JSON, never secrets) for administrators.
+- Bulk switch import (CSV / JSON, validated preview, all-or-nothing by default, idempotent,
+  automatic discovery afterwards) and export (CSV / JSON, never secrets) for administrators.
+- Command profile states per model family / AOS version (DRAFT, LAB_VERIFIED,
+  PRODUCTION_VERIFIED, BLOCKED, DEPRECATED): production restarts need PRODUCTION_VERIFIED, which
+  requires recorded evidence from a real switch.
 - Network path (device → access switch → distribution → core) and a read-only topology view,
   built from LLDP evidence without extra commands.
 - Alerts (multiple locations, MAC moves, undeclared trunks, SSH failures, circuit breaker, failed
@@ -84,16 +92,19 @@ Details: [docs/SECURITY.md](docs/SECURITY.md) and
 ## Supported switches
 
 Only these combinations are supported. Every command was verified against the official ALE CLI
-Reference Guides — **not yet on real hardware**; each model family/AOS version must pass the
-built-in lab verification before production use (the application enforces this).
+Reference Guides and tested against documented output fixtures — **not yet on real hardware**;
+each model family/AOS version must be LAB_VERIFIED (lab switches) or PRODUCTION_VERIFIED
+(production switches) before it can change anything (the application enforces this). The model
+and AOS version are always discovered from the device.
 
 | Profile | Models | AOS | Port format |
 |---|---|---|---|
 | `AOS8` | OS6360, OS6465, OS6560, OS6570M, OS6860, OS6860N, OS6865, OS6900, OS9900 | 8.x (guide 8.10R1) | `1/1/24` |
 | `AOS6` | OS6250, OS6350, OS6450 | 6.6, 6.7 (guide 6.7.1) | `1/24` |
 
-Unsupported (blocked): AOS 7 (OS10K), other AOS 6 models (OS6400/6850/6855/9000E), any other
-vendor. Full command list: [docs/ALCATEL_COMMAND_PROFILES.md](docs/ALCATEL_COMMAND_PROFILES.md).
+Unsupported (blocked): AOS 7 (OS10K — discovery fails closed), other AOS 6 models
+(OS6400/6850/6855/9000E), any other vendor (discovery fails: the ALE description and enterprise
+OID are both required). Full command list: [docs/ALCATEL_COMMAND_PROFILES.md](docs/ALCATEL_COMMAND_PROFILES.md).
 
 ## Quick start (new computer)
 
@@ -310,6 +321,7 @@ unavailable", SAFE MODE, port conflicts): [docs/TROUBLESHOOTING.md](docs/TROUBLE
 | [ARCHITECTURE](docs/ARCHITECTURE.md) | components, data flow, design decisions |
 | [SECURITY](docs/SECURITY.md) · [SECURITY_FIREWALL](docs/SECURITY_FIREWALL.md) | security model, MAC_OPERATOR checks, command firewall |
 | [DATABASE](docs/DATABASE.md) | schema, constraints, indexes, migrations, reliability |
+| [DISCOVERY](docs/DISCOVERY.md) | automatic device discovery, identity, mismatches |
 | [SWITCH_IMPORT_EXPORT](docs/SWITCH_IMPORT_EXPORT.md) | bulk switch import (CSV/JSON) and export |
 | [DEPLOYMENT](docs/DEPLOYMENT.md) | installation, HTTPS, first-time configuration, production enablement |
 | [WINDOWS_SETUP](docs/WINDOWS_SETUP.md) · [LINUX_SETUP](docs/LINUX_SETUP.md) | step-by-step installation |
@@ -325,6 +337,7 @@ unavailable", SAFE MODE, port conflicts): [docs/TROUBLESHOOTING.md](docs/TROUBLE
 cd backend && pip install -r requirements-dev.txt && python -m pytest    # no real switch needed
 cd frontend && npm ci && npm test && npm run build
 python backend/scripts/perf_search.py --switches 100 500 1000           # performance (simulated)
+python backend/scripts/perf_search.py --scenario discovery --switches 10 50 100 500
 ```
 
 The backend tests use a simulated OmniSwitch lab (in-process and over real SSH) — MAC found,
@@ -335,9 +348,10 @@ migrations and session security. CI runs the same suites on every push
 
 ## Known limitations
 
-- Commands are documentation-verified, not yet executed on real OmniSwitch hardware (the lab
-  verification step exists for this). Status: **application production ready for lab
-  validation** — not yet validated on a production network.
+- Commands and discovery are documentation-verified and fixture-tested, not yet executed on real
+  OmniSwitch hardware (the lab / production verification states exist for this). Status:
+  **ready for lab validation** — not validated on real hardware or a production network.
+- Serial numbers are not collected (no verified command); AOS 7 is not supported.
 - Zabbix: only host availability and current problems are shown; traffic/CPU/memory/temperature
   items are template-specific and not read.
 - One backend process by design (no Redis); no MFA/SSO.

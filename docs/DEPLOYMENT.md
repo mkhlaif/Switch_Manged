@@ -85,30 +85,37 @@ Optional: NetBox / Zabbix URLs and tokens in `.env`, then `docker compose up -d`
 **Never** enable state changes immediately after installation. Order:
 
 ```
-Fresh install ─► READ ONLY ─► Add switches ─► Test SSH ─► Test MAC search ─► Verify AOS profiles
-  ─► Run tests ─► Test with a LAB switch ─► Enable controlled restart ─► Test an endpoint port
-  ─► Production
+Fresh install ─► READ ONLY ─► Add switches ─► Discovery (identity) ─► Test MAC search
+  ─► Verify READ per model / AOS (LAB_VERIFIED) ─► Run tests ─► Test with a LAB switch
+  ─► Restart strategy LAB_VERIFIED ─► Promote with evidence (PRODUCTION_VERIFIED)
+  ─► Test an endpoint port ─► Production
 ```
 
-1. Complete section 4 for every model family / AOS version.
+1. Complete section 4 for every model family / AOS version. Every switch must show *Discovered*
+   under *Switches → Identity* ([DISCOVERY.md](DISCOVERY.md)); review every *Identity mismatch*.
 2. Run the automated tests on the version you deploy (`cd backend && python -m pytest`;
    `cd frontend && npm test`) — or check that CI is green for that commit.
-3. **Lab switch test** — on a lab switch of each model family / version (the application only
-   executes a restart strategy that has a verification record for that family and version, so
-   the first execution is validated by hand):
+3. **Lab switch test** — on a lab switch of each model family / version, marked
+   `environment = lab` (the application only executes a restart strategy whose profile state is
+   LAB_VERIFIED on lab switches and PRODUCTION_VERIFIED on production switches, so the first
+   execution is validated by hand):
    1. With dry run **on**, prepare a restart of a lab access port (*MAC Search* → result → restart).
       Note the exact commands and check the classification (ACCESS) and the command safety test.
    2. On the **lab switch console**, run those two commands once by hand and confirm that the
       port goes down and comes back up.
-   3. *Settings → Command profiles*: **Record** the strategy's verification for that model family
-      and AOS version, with your evidence in the notes.
+   3. *Settings → Command profiles*: **Record** the strategy's verification (LAB_VERIFIED) for
+      that model family and AOS version, with your evidence in the notes.
    4. In `.env`: `READ_ONLY_MODE=false` and `NETWORK_COMMAND_EXECUTION=ENABLED`, then
       `docker compose up -d`.
    5. *Safety Controls → Maintenance* (reason required, audited); *Settings → Port actions*: dry
       run **off** (confirmation dialog).
    6. Restart the lab port through the application (`RESTART PORT <port>`) and check the change
       report: port UP, MAC relearned, VLANs unchanged.
-   7. Dry run back **on**, *Safety Controls → Normal*. Until production go-live you may also set
+   7. The verified restart is the recorded evidence for production: *Settings → Command
+      profiles* → the record's `⋯` → **PRODUCTION_VERIFIED** (reason required; refused unless a
+      live restart of that strategy on a real SSH switch of that family / version verified
+      successfully). Do the same for READ after a passed verification run on a real switch.
+   8. Dry run back **on**, *Safety Controls → Normal*. Until production go-live you may also set
       `READ_ONLY_MODE=true` again.
 4. **Controlled production use** — for each maintenance window: *Safety Controls →
    Maintenance* (reason), perform the restarts, back to *Normal*. Keep dry run on outside planned

@@ -42,6 +42,19 @@ First look at: `docker compose ps` (all services `healthy`?), `/health`, and
 | `UNEXPECTED CLI OUTPUT` | the switch answered in an undocumented format; the result was discarded. Run the read-only verification on that model/version and report the output format |
 | `COMMAND FAILED … may not be compatible` | the switch rejected a command; nothing was changed |
 
+## Discovery
+
+| Identity / category | Cause | What to do |
+|---|---|---|
+| *Not discovered* | never reached securely yet, or address / port / transport changed | trust the host key (switch page) or supply the fingerprint; *Run discovery*; a MAC search also discovers it |
+| `HOST_KEY_UNTRUSTED` | no enrolled key and no fingerprint, or the switch presented another key than the supplied fingerprint (HIGH alert) | verify the fingerprint on the switch console; never trust a key you have not verified |
+| `DEVICE_UNREACHABLE`, `TIMEOUT`, `AUTHENTICATION_FAILED` | network, SSH service or credential | as for *Test SSH connection* |
+| `DISCOVERY_FAILED` | the answer did not identify an ALE OmniSwitch exactly (other vendor, AOS 7, unreadable model / version) | check the device; unsupported devices stay blocked by design |
+| `PROFILE_NOT_FOUND` (identity *Discovered*) | identified, but no command profile covers that model / AOS version | nothing can be run on it; see [ALCATEL_COMMAND_PROFILES.md](ALCATEL_COMMAND_PROFILES.md) |
+| *Identity mismatch* | the device differs from the expected metadata or from the identity discovered before (upgrade, replacement, wrong address) | check the switch; *Review and accept identity* with a reason, or fix the address / expected values |
+| Search result `blocked` / `PROFILE_NOT_VERIFIED` | no READ record for that model family / AOS version (real switches) | run the read-only verification on a lab switch of that family / version |
+| Restart plan says *needs PRODUCTION_VERIFIED* | production switch, strategy only LAB_VERIFIED | promote with evidence, or mark a lab switch `environment = lab` |
+
 ## Restarts
 
 | Symptom | Cause / fix |
@@ -87,8 +100,9 @@ They only see generic messages. The technical reason for every refusal is in *Au
 Frequent reasons for *"This device cannot be restarted automatically"*: the switch role is not
 `access`; the port has tagged VLANs, several MACs, an LLDP switch neighbour or an infrastructure
 description; NetBox documents the interface as tagged / LAG / management (or NetBox is configured
-but unreachable); the operation mode is not MAINTENANCE; the restart strategy is not lab-verified;
-dry run is on. See [ADMIN_GUIDE.md § MAC operators](ADMIN_GUIDE.md#mac-operators).
+but unreachable); the operation mode is not MAINTENANCE; the restart strategy is not LAB_VERIFIED (lab switch)
+or PRODUCTION_VERIFIED (production switch); the switch identity is not *Discovered*; some
+switches could not be checked during the search; dry run is on. See [ADMIN_GUIDE.md § MAC operators](ADMIN_GUIDE.md#mac-operators).
 
 *"The device could not be verified after restart"*: the restart was done, but the MAC did not
 come back on the same port and VLAN, or the VLANs / classification changed. The details are in

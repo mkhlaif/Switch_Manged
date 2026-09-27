@@ -59,8 +59,10 @@ checks; the backend waits for a healthy database and nginx for a healthy backend
 2. The MAC is validated and normalised (`00:11:22:33:44:55`, `00-11-…`, `0011.2233.4455`,
    `001122334455`); invalid or malicious values are rejected and audited before any connection.
 3. A background job opens at most `MAX_CONCURRENT_SSH` sessions at a time. For each switch:
-   profile applicability (model family + AOS version) and lab verification are checked, then the
-   firewall runs the MAC-filtered lookup.
+   if it was never identified, the registry's discovery command runs first in the same session
+   (other vendor / unreadable identity → DISCOVERY_FAILED, nothing else is sent) and the identity
+   is stored; then profile applicability (discovered model family + AOS version) and the profile
+   state are checked, and the firewall runs the MAC-filtered lookup.
 4. Only on switches where the MAC is found, only that port is inspected (VLANs, status, LLDP, MAC
    count) and classified.
 5. Results, progress (Server-Sent Events), alerts and the network path are stored and shown. The
@@ -69,15 +71,30 @@ checks; the backend waits for a healthy database and nginx for a healthy backend
 ## 4. Request flow: port restart
 
 ```
-prepare (read-only re-check, plan snapshot, admin-state check, restart policy,
+prepare (switch must be DISCOVERED; identity re-read first (show system) — changed → MISMATCH,
+         stop; read-only re-check, plan snapshot, admin-state check, restart policy,
          MAC_OPERATOR: endpoint evidence gate + NetBox evidence, dry-run safety test)
   → confirm ("RESTART PORT <port>"; simple dialog for MAC operators, no approval step)
-  → mode / kill switch / SAFE MODE / dry run / lab verification / rate limits
-  → switch lock + port lock → sealed restart authorization
-  → pre-restart re-verification (abort on any change; gate re-run for MAC operators)
+  → mode / kill switch / SAFE MODE / dry run / rate limits
+  → switch lock + port lock → sealed restart authorization (DISCOVERED; strategy LAB_VERIFIED on
+    lab switches, PRODUCTION_VERIFIED on production switches)
+  → identity re-read in the execution session, then pre-restart re-verification (abort on any
+    change; gate re-run for MAC operators)
   → down → hold → up  (down never re-sent; ambiguous timeouts read the port state first)
   → post-restart verification (port up, MAC on same port + VLAN, VLANs/classification unchanged)
-  → change report → audit
+  → outcome SUCCESS / VERIFICATION_FAILED / FAILED / UNKNOWN / BLOCKED + safe error category
+  → change report → audit (site, profile version, outcome, category)
+```
+
+## 4a. Request flow: automatic discovery
+
+```
+switch created / host key trusted / imported / address changed / "Discover all" / first search
+  → discovery job (bounded SSH concurrency, cancel, 30 min timeout)
+  → trusted host key (enrolled, or exactly the supplied fingerprint)
+  → firewall session → show system (registry) → vendor + model + version, strict formats
+  → one registry entry → compare expected metadata + previous identity
+  → DISCOVERED / MISMATCH (alert, circuit breaker) / DISCOVERY_FAILED (safe category) → audit
 ```
 
 ## 5. Request flow: bulk import
@@ -86,9 +103,10 @@ prepare (read-only re-check, plan snapshot, admin-state check, restart policy,
 POST /api/switches/import/validate (file as text, ≤ 5 MB / 5000 rows)
   → parse (CSV / JSON), reject secret-like and unknown columns
   → validate every row, compare with the file and the inventory → import_jobs row (preview)
-POST /api/switches/import/{id}/confirm (skip | update existing; acknowledge invalid rows)
-  → background task: per row re-check + own transaction; progress per 100 rows; cancel/timeout
-  → per-row result, audit SWITCH_IMPORT
+POST /api/switches/import/{id}/confirm (skip | update existing; mode atomic | per_row)
+  → background task: per row re-check; atomic: one transaction, rolled back on any failure /
+    cancel / timeout; per_row: own transaction per row, invalid rows acknowledged and skipped
+  → per-row result, audit SWITCH_IMPORT → discovery job for the imported switches
 ```
 
 ## 6. Data model
@@ -97,7 +115,7 @@ Main tables: `users`, `user_sessions`, `credentials` (Fernet-encrypted), `switch
 `command_profiles`, `command_verifications`, `mac_searches`, `mac_search_results`,
 `mac_sightings`, `port_actions`, `port_snapshots`, `operation_locks`, `audit_logs`
 (append-only triggers), `alerts`, `safety_events`, `ssh_sessions`, `system_settings`,
-`import_jobs`. Constraints, indexes and migrations: [DATABASE.md](DATABASE.md).
+`import_jobs`, `discovery_jobs`. Constraints, indexes and migrations: [DATABASE.md](DATABASE.md).
 
 ## 7. Design decisions
 

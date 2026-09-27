@@ -12,6 +12,7 @@ Alembic migrations, which run automatically when the backend starts.
 | 0002 | Command Safety Firewall (SSH session records, structured audit fields) |
 | 0003 | operations platform (RBAC incl. MAC_OPERATOR, modes, circuit breaker, verifications, alerts, safety events, snapshots, locks, append-only audit triggers) |
 | 0004 | switch import: `import_jobs`; switches `hostname`, `site`, `port_locations`; case-insensitive UNIQUE (host, SSH port) and name; CHECK ssh_port / role / transport; indexes on `mac_search_results` |
+| 0005 | automatic discovery: `discovery_jobs`; switches `vendor`, `discovery_status` (CHECK), `discovery_error` / `_category` / `_profile`, `discovered_at`, `system_name` / `_description` / `_object_id`, `expected_model`, `expected_aos_version`, `expected_host_key_fingerprint`, `environment` (CHECK production/lab) — typed model / version moved to the expected columns; `command_verifications.status` (CHECK LAB_VERIFIED / PRODUCTION_VERIFIED / BLOCKED / DEPRECATED) with who / when / why; `port_actions` `outcome`, `error_category`, `profile_version`; `audit_logs` `site`, `profile_version`, `error_category`, `outcome` (ADD COLUMN only: the append-only triggers stay); `import_jobs` `mode` (CHECK atomic/per_row), `discovery_job_id` |
 
 **0004 checks the existing data first.** If two switches share a management address or a name
 (ignoring upper/lower case), or a switch has an invalid port/role/transport, the upgrade stops
@@ -31,6 +32,7 @@ Verified (automated tests and Docker runs):
 | models == migrations (`alembic check`) | ✔ `tests/test_db_schema.py` | ✔ in the upgraded Docker deployment |
 | clean database → head | ✔ | ✔ clean install |
 | N-1 → N with existing data (0003 → 0004), references kept | ✔ | ✔ published version → new version |
+| 0004 → 0005 with data: identity moved to expected metadata, audit triggers kept, → 0004 → 0005 | ✔ | ✔ published version → this release, downgrade with the old code, re-upgrade |
 | N → N-1 (`alembic downgrade 0003`) → old code runs | ✔ | ✔ |
 | N → N-1 → N | ✔ | ✔ |
 | upgrade refused on duplicate inventory entries, nothing changed | ✔ | (same code path) |
@@ -43,8 +45,10 @@ definitions. A future SQLite batch migration of `switches` must re-create them (
 
 | Table | Constraints |
 |---|---|
-| `switches` | PK; UNIQUE `name`; UNIQUE `lower(name)`; UNIQUE (`lower(host)`, `ssh_port`); UNIQUE `hostname` when set; CHECK `ssh_port` 1–65535, `role` ∈ access/distribution/core/unknown, `transport` ∈ ssh/simulator; FK `credential_id` → credentials **RESTRICT** (a credential in use cannot be deleted) |
-| `import_jobs` | CHECK status / format / on_existing; FK `created_by_id` → users SET NULL |
+| `switches` | PK; UNIQUE `name`; UNIQUE `lower(name)`; UNIQUE (`lower(host)`, `ssh_port`); UNIQUE `hostname` when set; CHECK `ssh_port` 1–65535, `role` ∈ access/distribution/core/unknown, `transport` ∈ ssh/simulator, `discovery_status` ∈ not_discovered/discovered/discovery_failed/mismatch, `environment` ∈ production/lab; FK `credential_id` → credentials **RESTRICT** (a credential in use cannot be deleted) |
+| `import_jobs` | CHECK status / format / on_existing / mode; FK `created_by_id` → users SET NULL |
+| `discovery_jobs` | CHECK status; FK `created_by_id` → users SET NULL |
+| `command_verifications` | UNIQUE (profile, capability, family, version); CHECK status |
 | `users`, `user_sessions` | UNIQUE username; UNIQUE session token hash; sessions CASCADE with the user |
 | `credentials`, `command_profiles`, `command_verifications`, `operation_locks` | UNIQUE name / key / (profile, capability, family, version) / (scope, target) — the lock table makes two state-changing operations on one switch or port impossible |
 | `mac_search_results`, `mac_sightings`, `port_actions` | FKs to searches (CASCADE) and switches / users (SET NULL: history is kept when a switch or user is deleted) |

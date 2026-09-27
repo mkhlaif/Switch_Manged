@@ -283,3 +283,33 @@ or measured before it was fixed; the fix has a test or a recorded run.
 
 Unchanged by design (documented): no MFA/SSO, one backend process, commands not yet executed on
 real OmniSwitch hardware. Full results: [FINAL_PROJECT_REPORT.md](FINAL_PROJECT_REPORT.md).
+
+## 23. Third audit (2026-09-26/27): automatic discovery, profile states, structural port classes
+
+Scope: the master prompt (automatic discovery, discovery / command profile registries, profile
+states and evidence levels, port classes, MAC_OPERATOR boundary, import/export redesign, error
+categories, circuit breaker, audit fields). The repository was inspected first; existing
+components were extended, not replaced. Each finding was reproduced (test or recorded run) and
+has a test for its fix.
+
+| Id | Severity | Finding | Fix |
+|---|---|---|---|
+| A3-1 | HIGH | The model and AOS version typed by a user (form, import) selected the command profile. A wrong entry would have selected commands for another platform; "detect" only ran when the fields were empty | identity only from discovery (`show system`, vendor = description AND enterprise OID, strict version format, one Discovery Profile Registry entry); typed values moved to *expected metadata* (migration 0005); profile selection refuses undiscovered switches |
+| A3-2 | HIGH | No re-verification of the device before a state change: an upgraded or swapped switch kept its stored identity until someone re-detected it | identity re-read in the prepare session and again in the execution session before the down command; a difference aborts and sets MISMATCH (alert, circuit breaker) |
+| A3-3 | HIGH | A single verification record for "all models" (`*`) or a one-component version (`8`) enabled a capability for every model / every 8.x release; no distinction between lab and production | profile states LAB_VERIFIED / PRODUCTION_VERIFIED / BLOCKED / DEPRECATED per model family and major.minor; `*` capped at LAB, `8` ignored; production switches need PRODUCTION_VERIFIED, promotion only with recorded evidence from a real SSH switch; simulator runs never recorded |
+| A3-4 | HIGH | Deleting a verification record erased the history; nothing could block a capability that proved wrong | DELETE = DEPRECATED (kept); BLOCKED wins over every record; audited transitions with mandatory reason |
+| A3-5 | MEDIUM | Only five port classes: declared uplinks, link aggregates, management / stacking links and core/distribution ports were all "TRUNK" (overridable in EMERGENCY mode); Low-confidence LIKELY_ACCESS was restartable by operators | UPLINK / LAG / MANAGEMENT / STACK hard-blocked for every role; CORE / DISTRIBUTION like trunks; Low-confidence LIKELY_* reported as UNKNOWN; voice-VLAN pattern (IP phone + PC) keeps such ports at Medium confidence |
+| A3-6 | MEDIUM | Imports were per-row by default: a failing row left a partially imported file | atomic (all or nothing, one transaction) by default; per-row only as an explicit choice with acknowledgement |
+| A3-7 | MEDIUM | Imports required model / version and stored them as truth; no way to supply a host-key fingerprint, so every imported switch needed manual key enrolment | model / version optional expected metadata; `ssh_host_key_fingerprint` trusted only if the switch presents exactly that key (mismatch = HIGH alert, nothing trusted); discovery job after the import; export round-trips unchanged |
+| A3-8 | MEDIUM | `/api/simple` validation errors echoed schema field names and pydantic messages; AppError bodies would carry categories | generic bodies for every error on `/api/simple` (test with extra fields, oversized values, unknown paths) |
+| A3-9 | MEDIUM | No error categories: users saw raw exception titles; failed restarts had no outcome distinction | safe categories on errors, search results and port actions; outcome SUCCESS / VERIFICATION_FAILED / FAILED / UNKNOWN / BLOCKED; audit carries site, profile version, category, outcome |
+| A3-10 | MEDIUM | The circuit breaker ignored identity mismatches and failed post-restart verifications | two new triggers (default 3 in the window); a MAC that is merely not relearned does not count |
+| A3-11 | LOW | (found by the clean-install run) audit API did not return the new audit columns | serialised; API test |
+| A3-12 | LOW | (found by the clean-install run) a block caused by a missing verification was reported as the generic OPERATION_BLOCKED | category stored at the time of the failure (`mac_search_results.error_category`); real-SSH test |
+| A3-13 | LOW | (found by a full test run) race: an import became "completed" before its discovery job id was stored, so a client could miss the discovery | discovery job created before the import is marked final; test repeated |
+| A3-14 | LOW | Address change on a switch kept its "discovered" status and identity | status reset (rediscovery required); the previous identity is still compared, so a wrong new address cannot silently become another device |
+| A3-15 | LOW | NetBox comparison ignored the site | site compared in slug form |
+
+Not implemented, documented instead of guessed: serial number / chassis information (no verified
+command), AOS 7 discovery (no registry entry or documented output). Unchanged by design: no
+MFA/SSO, one backend process. **Nothing was run on real Alcatel-Lucent hardware.**

@@ -1,416 +1,359 @@
 # Final Project Report — Alcatel Network Operations & Safety Platform
 
-Date: 2026-09-26 · Repository: https://github.com/mkhlaif/Switch_Manged (branch `main`)
+Date: 2026-09-27 · Repository: https://github.com/mkhlaif/Switch_Manged · This release: branch
+`feature/automatic-discovery` (not yet merged or pushed; see *Deployment Instructions*).
 
-Every number in this report comes from a run on 2026-09-26 (Windows 11 + Docker Desktop 4.x /
-Engine 28.5, WSL2 Ubuntu 24.04.3, PostgreSQL 16, Python 3.11, Node 22). Nothing was tested on
-real Alcatel-Lucent hardware; every "switch" is the project's simulator (in-process, or over real
-SSH in the `sim-ssh` container). The first audit and its fixes are in
-[AUDIT_REPORT.md](AUDIT_REPORT.md) (sections 1–21); this iteration's audit is section 22.
+Every number in this report comes from a recorded run. Runs of **this release** (2026-09-26/27):
+automated tests, the Docker clean installation with PostgreSQL over real SSH, the Linux deployment
+test, the PostgreSQL upgrade / downgrade test, migration tests on SQLite, performance and UI checks.
+Results carried over from the **previous release** (2026-09-26, commit `5f83ed2`) are marked
+*(previous release)*. Environment: Windows 11 + Docker Desktop (Engine 28.5), WSL2 Ubuntu 24.04,
+PostgreSQL 16, Python 3.11, Node 22.
+
+**Nothing was tested on real Alcatel-Lucent hardware.** Every "switch" is the project's simulator,
+in-process or behind a real SSH server (`sim-ssh` container). Audit findings:
+[AUDIT_REPORT.md](AUDIT_REPORT.md) — § 1–21 first audit, § 22 second, § 23 this release.
 
 # Executive Summary
 
-**Status: APPLICATION PRODUCTION READY FOR LAB VALIDATION** — not "full network production
-ready", because the AOS commands have not yet been executed on real OmniSwitch hardware.
+**Status: READY FOR LAB VALIDATION** — not production-ready for a live network: no command,
+discovery answer or restart has been executed on a real OmniSwitch, and no capability is
+LAB_VERIFIED or PRODUCTION_VERIFIED by this project.
 
-This iteration delivered:
+This release makes the platform identify every switch itself:
 
-- **MAC_OPERATOR direct restart** — search a MAC, see only the device's location, restart its
-  endpoint port with a simple confirmation and **no administrator approval**; in exchange the
-  server now requires independent evidence that the port is a single endpoint port and
-  re-validates it immediately before and after the change.
-- **Bulk switch import** (CSV / JSON; validation, preview, explicit confirmation, background
-  batches, idempotent, up to 5000 switches) and **export** (CSV / JSON, never secrets).
-- **A new full audit** with 16 findings (3 HIGH, 7 MEDIUM, 6 LOW) — all fixed and covered by tests
-  or recorded runs ([AUDIT_REPORT.md § 22](AUDIT_REPORT.md)). The most important: SQLite
-  migrations could null foreign keys, the documented rollback restore produced a mixed database,
-  and two security tests had silently stopped checking anything after a FastAPI upgrade.
+- **Automatic discovery.** A switch is added with IP / hostname + credential reference (+ ideally
+  the SSH host-key fingerprint). The platform reads vendor, model and AOS version from the device
+  (`show system`, Discovery Profile Registry, vendor = ALE description **and** enterprise OID),
+  selects the command profile, and refuses every state change on a device it has not identified
+  exactly. Typed model / version became *expected metadata*; a difference, or a device that
+  changed since it was discovered, is an **identity mismatch** that blocks restarts until an
+  administrator reviews it. The identity is read again before every restart, in the prepare and
+  in the execution session.
+- **Command profile states** per model family and AOS version: DRAFT, LAB_VERIFIED,
+  PRODUCTION_VERIFIED, BLOCKED, DEPRECATED. Production switches need PRODUCTION_VERIFIED, which the
+  server grants only with recorded evidence from a real SSH switch; simulator runs are never
+  evidence.
+- **Structural port classes** (UPLINK, LAG, MANAGEMENT, STACK — never restartable; CORE,
+  DISTRIBUTION — like trunks) and Low-confidence evidence reported as UNKNOWN.
+- **Import / export redesign**: model / version optional, `credential_reference`,
+  `ssh_host_key_fingerprint`, `environment`; **all-or-nothing import by default**; discovery after
+  the import; exports round-trip unchanged.
+- **Safe error categories, action outcomes and extended audit** (site, profile version, category,
+  outcome); two new circuit-breaker triggers (identity mismatches, failed verifications).
+- **Audit**: 15 findings (4 HIGH, 6 MEDIUM, 5 LOW), all fixed with tests
+  ([AUDIT_REPORT.md § 23](AUDIT_REPORT.md)); three of them were found by this release's own
+  end-to-end and full-suite runs.
 
-Results: 565 backend + 27 frontend automated tests pass (0 failed, 0 skipped); clean installation
-on Windows 36/36 end-to-end checks; Linux (Ubuntu 24.04) 23/23; upgrade from the published version
-and rollback verified on PostgreSQL; frontend audit 112 page/viewport/theme combinations without a
-problem.
+Results: **611 backend** and **30 frontend** automated tests pass (0 failed, 0 skipped); clean
+installation on PostgreSQL over real SSH **48/48**; Linux deployment **24/24**; PostgreSQL upgrade
+from the published version with data, downgrade with the old code and re-upgrade **17/17**;
+rendered UI check 9/9.
 
 # Architecture
 
 nginx (unprivileged, `edge` network) → FastAPI backend (one process, read-only filesystem, `edge`
-+ internal `data` network) → PostgreSQL 16 (`data` only). The backend reaches the switches over
-SSH (asyncssh, host-key pinning) and, optionally, NetBox / Zabbix read-only. Every network
-operation passes authorization → operation policy → Command Safety Firewall → AOS command profile
-→ validator → SSH executor. New in this iteration: `import_jobs` + background import worker, the
-MAC_OPERATOR endpoint evidence gate in the restart policy, request-size middleware, container /
-network hardening. Details: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
++ internal `data` network) → PostgreSQL 16 (`data` only). The backend reaches switches over SSH
+(asyncssh, host-key pinning) and, optionally, NetBox / Zabbix read-only. Every network operation
+passes authorization → operation policy → Command Safety Firewall → AOS command profile →
+validator → SSH executor; the only code that can write to a switch CLI verifies the firewall's HMAC
+seal.
 
-# MAC_OPERATOR
+New in this release: `services/discovery` (Discovery Profile Registry, identity evaluation,
+background jobs), `/api/discovery/*`, profile states in `command_verifications`,
+`core/error_categories.py`, migration 0005, the discovery gate in `port_control` and in the
+firewall's restart authorization. Flows: [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md).
 
-What the role can do — nothing else:
+# Implemented Features
 
-| Capability | Detail |
+| Area | Features |
 |---|---|
-| Search a MAC address | any common format; the answer is *Device Found* + **location**, *Not Found*, *Multiple locations*, or a generic message |
-| See the device location | administrator's label for the port (e.g. *Building A - Floor 2 - Office 204*), else switch site + location, else *Location not recorded* |
-| Restart the device directly | simple confirmation, **no administrator approval** |
+| Discovery | registry (AOS 8 / AOS 6, sources, patterns, fixtures), vendor + model + version from the device, expected metadata comparison, mismatch review, discovery jobs (bounded, cancellable, 30 min timeout), discovery on create / key trust / address change / import / first search, re-identification before every restart |
+| MAC search | FAST / STANDARD / DEEP, any MAC format, bounded SSH concurrency, path and topology from LLDP evidence, alerts, safe error category per switch |
+| Port inspection | state, speed, VLANs, LLDP, MAC count, counters, classification with evidence (11 classes) |
+| Port restart | link bounce / PoE cycle; re-check, typed confirmation, locks, sealed authorization, identity + state re-verification, post-restart verification, outcome, change report |
+| MAC_OPERATOR | location-only search, direct restart of a verified endpoint port without approval, every technical check mandatory |
+| Command profiles | allowlisted AOS 8 / AOS 6 commands with sources; profile states and evidence levels; read-only verification run; custom profiles linted |
+| Safety | operation modes, kill switch, SAFE MODE circuit breaker (6 triggers), dry run, network state vocabulary |
+| Inventory | CRUD with expected metadata / fingerprint / environment, bulk import (atomic or per row), export without secrets |
+| Integrations | NetBox and Zabbix read-only |
+| Audit | append-only, structured, command fingerprints, SSH session records |
 
-Never sent to the role (the API response itself is role-aware, verified by tests and in the
-browser): switch name, IP, VLAN, model, AOS version, port, LLDP, MAC table, commands, technical
-errors. Allowed response keys: `state, message, location, can_restart, search_id, request_id`.
+# Automatic Discovery
 
-Mandatory automatic checks before a MAC_OPERATOR restart (all implemented and tested; details in
-[docs/SECURITY.md § 4](docs/SECURITY.md#4-mac_operator-direct-endpoint-restart)): authenticated
-user, role, own search ≤ 10 min, exactly one High-confidence ACCESS location on a switch with role
-`access`, every switch answered, fresh read of MAC / switch / port / VLAN / port state / LLDP / MAC
-count on the switch, admin-disabled ports refused, endpoint evidence gate (single untagged VLAN,
-no tagged VLANs, MAC in that VLAN, ≤ 3 MACs, link up, < 10 Gbit/s, no uplink / trunk / management
-/ stack / LAG description, all evidence readable), NetBox evidence when configured (fail closed if
-unreachable), unchanged switch / port / VLAN since the search, AOS profile + lab-verified
-strategy, Command Safety Firewall safety test and sealed authorization, operation lock, circuit
-breaker / SAFE MODE, kill switch, MAINTENANCE mode, `NETWORK_COMMAND_EXECUTION=ENABLED`, dry run
-off, a second fresh re-check + gate immediately before *down*. After *up*: port up, MAC relearned
-on the same port and VLAN, VLANs and classification unchanged — otherwise *"The device could not
-be verified after restart. Please contact IT support."*; never retried automatically. Before /
-after state, fingerprints and verification are in the audit log and the port action.
+Flow, statuses and operations: [docs/DISCOVERY.md](docs/DISCOVERY.md).
 
-Blocked for the role (tested): TRUNK, LIKELY_TRUNK, declared uplinks, core / distribution /
-unknown-role switches, UNKNOWN classification, LIKELY_ACCESS, link aggregates, management / stack
-/ LAG descriptions, NetBox tagged / LAG / mgmt-only / disabled interfaces, admin-disabled ports,
-ports with tagged VLANs or more than 3 MACs, 10G links.
+| Rule | Enforcement | Test / run |
+|---|---|---|
+| Vendor = ALE only if description **and** OID 1.3.6.1.4.1.6486 agree | parser `detect_vendor` | unit tests; other-vendor answer → DISCOVERY_FAILED, only `show system` sent (API test) |
+| Version only in the documented AOS format | `normalize_discovered_version` | 8 malformed / injected formats rejected |
+| Exactly one registry entry (family + version of one generation) | `match_profile` | AOS 6 platform reporting 8.x → no entry |
+| Expected metadata compared (family / major.minor) | `apply_discovery` | mismatch tests; clean install: expected OS6450 vs OS6900 → MISMATCH |
+| Previously discovered identity compared, also after an address change | `apply_discovery` | tests incl. address change to another device |
+| Host key trusted only if it equals the supplied fingerprint | `_trust_expected_host_key` | wrong fingerprint → HOST_KEY_UNTRUSTED, nothing stored (clean install) |
+| Unidentified device → no state change | port_control + firewall `authorize_restart` | DISCOVERY_REQUIRED / DEVICE_NOT_DISCOVERED tests |
+| Identity re-read before a restart (prepare and execution sessions) | port_control | upgrade between confirmation and execution → aborted, only `show system` sent; SSH session records of the clean-install restart show `system_info` first in both sessions |
+| Mismatch → alert, circuit breaker, admin review with reason | discovery service, API | tests; clean install acceptance |
 
-API security (tested): IDOR (another user's search or restart id → generic error), parameter
-tampering and field injection (`switch_id`, `port`, `vlan`, `role`, `command`, `confirmations`,
-`profile` → 400/422), role manipulation (user / switch / settings / credential / breaker /
-import / export / topology / NetBox endpoints → 403, audited as RBAC_VIOLATION HIGH), hidden
-endpoint enumeration (the route test covers all 81 endpoints), two MAC operators restarting the
-same port concurrently (exactly one restart).
+Measured: discovery of 10 / 50 / 100 / 500 switches in 0.43 / 1.86 / 3.03 / 14.95 s (see
+*Performance*). Clean installation over real SSH: 4 imported switches without model / version →
+1 discovered (OS6860E-P24 / 8.9.221.R03 → AOS8), 1 mismatch, 1 HOST_KEY_UNTRUSTED, 1 waiting for its
+host key → trusted by the administrator → discovered (OS6450-P24 / 6.7.2.191.R08 → AOS6).
 
-# Bulk Switch Import
+Not collected: serial number / chassis inventory (no verified command). Not supported: AOS 7
+(no registry entry, no documented output — such switches end DISCOVERY_FAILED).
 
-- Formats: CSV (comma or semicolon, UTF-8, BOM accepted) and JSON (list or `{"switches": [...]}`,
-  plus `port_locations`). Limits: 5 MB, 5000 rows.
-- Workflow: upload → server validation → preview (Total, Valid, Invalid, Duplicates, Warnings,
-  New, Existing changed, Unchanged, per-row errors, downloadable error report) → explicit
-  confirmation (skip or update existing; invalid rows must be acknowledged) → background job
-  (per-row transaction, progress every 100 rows, cancel, 15-min timeout, interrupted-job
-  detection) → per-row result (imported, updated, unchanged, skipped, failed).
-- Validation (55 tests): names, hostnames, IPs, ports, models, AOS versions (must match a
-  supported profile), roles, booleans, duplicates within the file and against the inventory,
-  malformed rows, duplicate rows, CSV formula injection, control characters, command /
-  shell metacharacters, oversized files, deep JSON, unexpected columns, secret-like columns
-  (`password`, `token`, `key`, … → file rejected; credentials only by name).
-- Safety: nothing written before confirmation; one import at a time; existing switches never
-  silently overwritten; a row taken concurrently fails alone (UNIQUE constraint); re-import is
-  idempotent; audit entries for validate / start / cancel / result.
-- Measured (PostgreSQL): 1000 rows in 9.1 s, 5000 rows in 55.7 s; validation of 5000 rows 0.64 s.
-- Guide: [docs/SWITCH_IMPORT_EXPORT.md](docs/SWITCH_IMPORT_EXPORT.md).
+# Command Profile System
 
-# Bulk Switch Export
+Details: [docs/ALCATEL_COMMAND_PROFILES.md](docs/ALCATEL_COMMAND_PROFILES.md).
 
-CSV and JSON (Excel not added — the stack has no spreadsheet library and CSV opens in Excel):
-name, hostname, management_ip, ssh_port, model, aos_version, site, location, description, role,
-enabled, credential (name only), uplink_ports, status, created_at, updated_at (+ port_locations in
-JSON). Never exported: passwords, encrypted passwords, host keys, private keys, tokens, TLS keys
-(tested with a stored host key and credential). CSV formula / newline / delimiter safe
-(`csv_cell` + full quoting), server-generated file name, admin-only, 10 per minute, 20 000
-switches max, audited. Export → re-import round trip reports every switch *unchanged* (tested for
-CSV and JSON).
+- **Sources**: only the official ALE CLI Reference Guides (AOS 8.10R1 [A8], AOS 6.7.1 [A6]); page
+  references per command. No command was added or changed in this release; nothing comes from AI
+  output, blogs or guesses.
+- **Evidence levels**: SIMULATED, FIXTURE_TESTED, LAB_VERIFIED, PRODUCTION_VERIFIED. Every built-in
+  read command is FIXTURE_TESTED (documented output fixtures) and SIMULATED; restart commands are
+  SIMULATED only (they print nothing).
+- **Profile states** per capability (READ, each restart strategy) × model family × major.minor:
+  no record = DRAFT; LAB_VERIFIED (reads, lab switches); PRODUCTION_VERIFIED (production restarts;
+  promotion requires recorded evidence from a real SSH switch — a passed verification run for READ,
+  a live restart with a successful post-restart verification for a strategy); BLOCKED (wins over
+  everything); DEPRECATED (revoked, kept). Audited transitions with a mandatory reason.
+- Legacy records: `*` (all models) counts as LAB_VERIFIED at most, `8` (one component) does not
+  count; new records need an exact family and major.minor.
+- Exact match or block: no fallback to another profile; the profile is chosen from the discovered
+  identity only.
 
-# Security Audit
+| Command family | Source | Evidence here |
+|---|---|---|
+| Discovery `show system` | [A8] p.61-56, [A6] p.2-31 | FIXTURE_TESTED, SIMULATED, SSH simulator |
+| MAC lookup / MACs on port | [A8] p.4-41, [A6] p.20-10 | FIXTURE_TESTED, SIMULATED, SSH simulator |
+| VLAN membership | [A8] p.5-13, [A6] p.25-15 | FIXTURE_TESTED, SIMULATED, SSH simulator |
+| Port status / admin state | [A8] p.1-59, 1-63, [A6] p.23-49, 23-79 | FIXTURE_TESTED, SIMULATED, SSH simulator |
+| LLDP | [A8] p.18-63, [A6] p.13-47 | FIXTURE_TESTED, SIMULATED, SSH simulator |
+| Link bounce | [A8] p.1-3, [A6] p.23-15 | SIMULATED, SSH simulator |
+| PoE cycle | [A8] p.2-4, [A6] p.4-2 / 4-4 | SIMULATED |
 
-16 findings, all fixed ([AUDIT_REPORT.md § 22](AUDIT_REPORT.md)). HIGH: SQLite migrations nulling
-foreign keys (A2-1); rollback restore producing a mixed database (A2-2); vacuous route-security
-tests after the FastAPI upgrade (A2-3). MEDIUM: MAC_OPERATOR evidence gaps (A2-4), bounce of
-admin-disabled ports (A2-5), unbounded request bodies / missing proxy limits (A2-6), restore
-scripts leaving the app stopped (A2-7), unusable admin from PowerShell pipes (A2-8), audit write
-failures on long values (A2-9), container privileges and network exposure (A2-10).
+# MAC Operator
 
-Automated security coverage (all passing): SQL injection and command injection payloads in MAC,
-port, switch id, path, username and import fields; XSS (React escaping, no `innerHTML` /
-`dangerouslySetInnerHTML`); CSRF (double-submit, SameSite=strict, stolen cookie without token
-cannot change anything); SSRF (no user-supplied URL is fetched — NetBox/Zabbix URLs from the
-environment only, switch hosts admin-only); IDOR; RBAC bypass (every endpoint); authentication
-bypass; path traversal (export format and file names server-controlled); file upload abuse
-(size, depth, types, secrets); CSV injection; parameter tampering; arbitrary CLI (request guard,
-strict schemas, firewall seal); secret leakage (API, audit, logs, exports, backups).
+Unchanged capabilities: search a MAC and see only the device's location; restart the endpoint
+port directly with a simple confirmation, **no administrator approval**, every technical check
+mandatory ([docs/SECURITY.md § 4](docs/SECURITY.md#4-mac_operator-direct-endpoint-restart)).
 
-Static review (repository scan): no `eval(`, `exec(`, `os.system`, `shell=True`, `pickle`,
-`yaml.load`, `innerHTML`, `dangerouslySetInnerHTML` or f-string SQL anywhere; `subprocess` only in
-tests (running Alembic); raw SQL only as constants in migrations, the health check and the audit
-triggers; `localStorage` only for the light/dark theme; outside the tests (synthetic fixture
-passwords) the only credential-like literal is the documented public password of the lab
-simulator. No real secret in the repository or its history (checked before the push).
+New in this release:
 
-# Database Audit
+- the switch must be **discovered** (identity re-read twice before the change); structural classes
+  and Low-confidence evidence are never offered;
+- **no restart offer** while any switch could not be checked (uncertain location) — seen in the
+  clean-install run with an unreachable switch in the inventory;
+- **no technical text in any error**: `/api/simple` validation errors (extra fields, oversized
+  values), unknown paths and application errors return generic sentences without field names,
+  validation details or error categories (tested; clean install);
+- discovery, registry and inventory APIs return 403 for the role.
 
-Details: [docs/DATABASE.md](docs/DATABASE.md). Models == migrations (`alembic check`) on SQLite
-and on PostgreSQL. Migrations tested from an empty database, N-1 → N with data (SQLite test and
-the published version → new version on PostgreSQL), N → N-1, N → N-1 → N, and the pre-upgrade
-check that refuses duplicate inventory entries without changing anything. New constraints:
-case-insensitive UNIQUE name and (host, SSH port), UNIQUE hostname when set, CHECK SSH port /
-role / transport / import status. Reliability: bounded pool, connect / statement /
-idle-in-transaction timeouts, per-request sessions, lock expiry and startup cleanup, interrupted
-jobs detected, UNIQUE races answered with 409 / per-row failure. Indexes added only where
-measured: 1 M search results — topology 76 → 4.7 ms, dashboard 123 → 0.15 ms, switch delete
-180 → 57 ms; duplicate lookups at 8 000 switches no longer full scans. Size: 226 bytes per search
-result row incl. indexes.
+Allowed response keys remain `state, message, location, can_restart, search_id, request_id`.
+Verified in the clean installation: location-only answer, restart blocked by the safe defaults,
+then — after opting in and a MAINTENANCE window — a direct restart on a lab switch, verified
+(*Device restarted successfully.*).
 
-# Backend Audit
+# Safety Architecture
 
-- 81 endpoints enumerated from the application (including nested routers): 3 public (`/health`,
-  `/api/health`, login), 4 session-only (me, logout, change password, the operation gateway which
-  checks the permission per operation), 74 session + permission. All request bodies use strict
-  schemas; 21 bodies checked for command-like fields.
-- Rate limits added: NetBox reconciliation, exports (audit / history / switches), import
-  validation, switch detect, host-key fetch, lab verification run (existing: login, password
-  change, searches, port queries, restarts, switch test). Every list is paginated with a maximum;
-  exports are capped.
-- Request bodies limited to 1 MB (12 MB for the import) before authentication; nginx the same.
-- Errors: structured, no stack traces, reference ids; OpenAPI disabled in production.
-- Transactions: per request; imports per row; restarts use DB-backed locks with expiry.
+| Property | How |
+|---|---|
+| UNKNOWN DEVICE / UNKNOWN AOS = no state change | discovery status gate in port_control and in the firewall's restart authorization |
+| UNKNOWN COMMAND PROFILE = no execution | profile selection refuses undiscovered switches; no profile → nothing sent |
+| UNKNOWN PORT TYPE = no restart | UNKNOWN (incl. Low-confidence LIKELY_*) blocked for every role |
+| Trunks / uplinks / core / distribution | UPLINK, LAG, MANAGEMENT, STACK hard-blocked; TRUNK / LIKELY_TRUNK / CORE / DISTRIBUTION only admin + EMERGENCY + two phrases |
+| PROFILE NOT VERIFIED = no production execution | `authorize_restart` requires PRODUCTION_VERIFIED on production switches (LAB_VERIFIED on lab switches / simulator); clean install: production switch → dry run only |
+| SAFETY CHECK FAILURE = block | policy, endpoint gate, safety test, pre-restart re-verification, identity check |
+| VERIFICATION FAILURE = no blind retry | down never re-sent; ambiguous results read state first; outcome VERIFICATION_FAILED / UNKNOWN; circuit breaker counts |
+| Global state | NORMAL / READ_ONLY / SAFE_MODE / EMERGENCY_STOP / MAINTENANCE (+ EMERGENCY_OVERRIDE) exposed as `network_state` |
+| Locks | DB-backed switch + port locks (UNIQUE), expiry and startup cleanup |
+| Firewall | allowlist unchanged; HMAC-sealed requests; no `/execute-command`; request guard on every route |
 
-# Frontend Audit
+Outcomes of a port action: SUCCESS, VERIFICATION_FAILED, FAILED, UNKNOWN, BLOCKED — with a safe error
+category and the content hash of the profile used (`profile_version`).
 
-- 112 combinations — 12 admin pages + import dialog + 4 settings tabs + login + MAC-operator idle
-  and result screens, at desktop / tablet / mobile, light and dark — on the production build
-  behind nginx, with 7003 switches in the inventory: no horizontal overflow, no unlabelled form
-  control, no page error, no 5xx response, no sensitive data in `localStorage` / `sessionStorage`
-  or URLs, session cookie `HttpOnly` + `Secure` + `SameSite=Strict`, no technical text and no
-  technical navigation for the MAC operator.
-- Import dialog driven with a real file (desktop and mobile): correct preview counts, confirm
-  disabled until invalid rows are acknowledged.
-- The backend stays authoritative: the MAC-operator screen and the admin-only buttons are
-  convenience only (tests call the API directly).
-- 27 frontend tests (login, technical search, restart confirmation, role navigation,
-  MAC-operator screen incl. location, import dialog, admin-only controls).
-- Observation: the switches list renders every row (7003 rows in 4.7 s, filter 0.44 s; about
-  0.7 s at 1000 switches) — see Known Limitations.
+# RBAC
 
-# SSH Infrastructure
+Four roles (admin, operator, readonly, mac_operator) with a fixed permission matrix. New endpoints:
+discovery run / jobs / cancel / accept (admin: MANAGE_INVENTORY), jobs list (VIEW_INVENTORY),
+registry (VIEW_SAFETY), profile state changes (MANAGE_PROFILES). The route test enumerates every
+endpoint (including the new ones) and asserts authentication and permission; MAC_OPERATOR gets 403
+on all of them (tested and in the clean installation).
 
-Connection lifecycle through one manager with a global semaphore (`MAX_CONCURRENT_SSH`, default
-5; the performance test never exceeded it), connect / login / command timeouts plus an overall
-connect deadline, maximum session duration and 60 commands per session, keep-alives, bounded
-close. Host-key pinning (unknown or changed keys refused; lab-only override never on by default).
-Prompt learning, pager answering, `ERROR:` detection, silent-login nudge; unexpected output is
-discarded and counted by the circuit breaker. Retries: connection-level only, 0–5 (default 1)
-with back-off; authentication and host-key failures never retried; a state-changing command is
-never re-sent (ambiguous timeouts read the admin state first). No password or key in any log or
-`repr`. Failure modes tested: timeout, silent command, malformed output, authentication failure,
-connection refused, host-key mismatch, session drop mid-restart.
+# SSH Security
 
-# Command Safety Firewall
+Unchanged mechanisms (host-key pinning, bounded sessions and commands, timeouts, no blind
+retries, no secrets in logs). New: discovery never trusts an unknown key — only an enrolled key or
+exactly the fingerprint supplied out of band (wrong fingerprint → HIGH alert, nothing stored); an
+address or port change clears the trusted key and the identity. Discovery jobs use the global SSH
+semaphore (peak 5 sessions at 500 switches).
 
-Unchanged allowlist — no command was added or modified. Every execution path was searched
-(`asyncssh`, `run`, `exec`, `send`, `write`, `create_process`, `subprocess`, `shell`): the only
-place that writes to a switch CLI is `InteractiveCli.run()` via the transports'
-`run_approved()`, which verifies the firewall's HMAC seal; a test fails if anything else calls
-it. The HTTP layer has no command field (request guard + strict schemas, now verified on every
-route). 105 firewall tests pass.
+# Import/Export
 
-# AOS Compatibility
+Details: [docs/SWITCH_IMPORT_EXPORT.md](docs/SWITCH_IMPORT_EXPORT.md). Required columns: `name`,
+`management_ip`. Optional: `credential_reference`, `ssh_host_key_fingerprint`, `ssh_port`,
+`expected_model` / `model`, `expected_aos_version` / `aos_version`, `environment`, hostname, site,
+location, description, role, enabled, uplink ports, (JSON) port locations. Validation pipeline:
+format, size, header (secret-like / unknown / alias conflicts), per-row fields, duplicates in the
+file and against the inventory, fingerprint vs trusted key, coverage warnings, CSV injection,
+control characters. **Atomic by default** (one transaction; any failure / cancel / timeout rolls
+back), per-row as explicit choice; idempotent; discovery job afterwards. Export: no passwords or
+keys, fingerprint and discovered identity included, formula-safe, round trip unchanged (tested,
+clean install).
 
-| Profile | Models | AOS | Status |
-|---|---|---|---|
-| `AOS8` | OS6360, OS6465, OS6560, OS6570M, OS6860, OS6860N, OS6865, OS6900, OS9900 | 8.x (guide 8.10R1) | documentation-verified; lab verification required per model family / version |
-| `AOS6` | OS6250, OS6350, OS6450 | 6.6, 6.7 (guide 6.7.1) | documentation-verified; lab verification required |
-| `AOS7` (OS10K, OS6900 7.x) | — | — | disabled |
-| anything else | — | — | blocked ("Command profile unavailable") |
+# NetBox
 
-Every command has operation, template, models, AOS version, expected prompt, parser, expected
-output, risk and verification source ([docs/ALCATEL_COMMAND_PROFILES.md](docs/ALCATEL_COMMAND_PROFILES.md)).
-The importer refuses model / version pairs without a profile.
+Read-only (GET only), from the environment configuration. Compared with the inventory / live data:
+management IP, model (discovered), role, **site (new)**, interface VLANs / mode / enabled. Used as
+fail-closed evidence for MAC_OPERATOR restarts; never updated. Tested against mocked HTTP
+responses only.
 
-# Docker Infrastructure
+# Zabbix
 
-Verified on the running containers: backend uid 10001, read-only root filesystem, all
-capabilities dropped; nginx `nginx-unprivileged` — every process runs as `nginx` (uid 101), all
-capabilities dropped; PostgreSQL processes run as `postgres`; `no-new-privileges` everywhere;
-memory limits (1 GB / 1 GB / 256 MB, configurable) and PID limits; `edge` and internal `data`
-networks — the web container cannot even resolve the database; only the web ports are published,
-on `127.0.0.1` by default. Health checks with startup ordering, `restart: unless-stopped`, named
-volume for the database. Base images pinned by version tag (`python:3.11-slim`,
-`node:22-bookworm-slim`, `nginxinc/nginx-unprivileged:1.27-alpine`, `postgres:16-alpine`); no
-secret in any image (all from `.env`). Redis is not used (by design; documented).
-
-nginx / HTTPS: TLS 1.2/1.3, HTTP → HTTPS redirect preserving a non-standard port, HSTS on HTTPS,
-CSP, `X-Frame-Options: DENY` / `frame-ancestors 'none'`, `nosniff`, `Referrer-Policy`, body limits,
-`limit_req` for login and API, proxy timeouts, `X-Forwarded-For` overwritten with the peer address.
-Verified over HTTPS on Ubuntu 24.04.
-
-# Authentication & RBAC
-
-argon2 passwords (12+ characters, 3 classes, max 256); HttpOnly + SameSite=strict (+ Secure)
-session cookie with CSRF token; lockout after 5 failures; login rate limits (backend per user /
-IP, nginx per IP); 8 h lifetime, 60 min idle timeout; logout, password change, role change,
-disabling and forced logout end sessions (tested, 8 session tests). Four roles with a fixed
-permission matrix (import / export are admin-only permissions); nobody changes their own role;
-the last administrator is protected. RBAC is enforced on every route (81 checked).
+Read-only: host availability and current problems on the switch page. Tested against mocked HTTP
+responses only. Unchanged in this release.
 
 # Audit Logging
 
-Append-only (database triggers). Every entry: time, user, role, source IP, operation, target,
-switch, port, MAC, VLAN, profile, command fingerprint, risk, approval, result, error, before /
-after state. New events: `SWITCH_IMPORT_VALIDATE`, `SWITCH_IMPORT_START`, `SWITCH_IMPORT`,
-`SWITCH_IMPORT_CANCEL`, `SWITCH_EXPORT`, `SIMPLE_RESTART_BLOCKED` with the precise reason. Fields
-bounded to their column size, oversized JSON truncated with a marker, CR/LF escaped in log lines,
-secret-named keys scrubbed; verified: no password of any kind in the audit log after the
-end-to-end run.
+Append-only (database triggers, preserved by migration 0005 on SQLite and PostgreSQL). New fields:
+**site, profile_version, error_category, outcome** (also returned by the audit API). New events:
+`DEVICE_DISCOVERY` (identity, registry entry, commands, source), `DISCOVERY_JOB_START`,
+`DISCOVERY_JOB`, `DISCOVERY_JOB_CANCEL`, `DISCOVERY_ACCEPT`, `PROFILE_STATE_CHANGE`, and
+`HOSTKEY_TRUST` for keys trusted from a supplied fingerprint. No secrets: verified after the
+clean-installation run (no password of any kind in the audit log).
 
 # Circuit Breaker
 
-Trips to SAFE MODE on repeated SSH / authentication failures of healthy switches, validation
-failures and unexpected CLI output (tests); SAFE MODE blocks state-changing operations for every
-role including MAC operators (tested), reads continue; only administrators reset it (with a
-reason). The kill switch (STOP ALL NETWORK OPERATIONS, and `NETWORK_COMMAND_EXECUTION` ≠ `ENABLED`)
-blocks restarts — verified end to end for the MAC operator.
+Trips to SAFE MODE (persisted; admin reset with reason) on, within the window: SSH failures and
+authentication failures of healthy switches, HIGH/CRITICAL validation failures, unexpected CLI
+output, and — new — **identity mismatches** (default 3) and **failed post-restart verifications**
+(default 3; a MAC that is merely not relearned does not count). Thresholds configurable. Tests for
+both new triggers.
 
-# Backup & Restore
+# Testing
 
-`backup.sh` / `backup.ps1` (pg_dump inside the container; Linux file mode 600) and `restore.sh` /
-`restore.ps1`, which now restore into a fresh database, swap it in only on success, keep the
-previous database, and always restart the application. Verified on Windows and Ubuntu: backup →
-change → restore returns the exact backed-up state; a corrupted file is refused with the database
-unchanged and the application running; a pre-upgrade backup restored over an upgraded database
-gives exactly the old schema and data. Backup contents checked: no plaintext switch password,
-user password, `POSTGRES_PASSWORD` or `CREDENTIAL_ENCRYPTION_KEY` — only argon2 hashes and Fernet
-ciphertext. Configuration recovery = `.env` (keep `CREDENTIAL_ENCRYPTION_KEY` separately).
-[docs/BACKUP_RESTORE.md](docs/BACKUP_RESTORE.md), [docs/UPGRADE.md](docs/UPGRADE.md).
+| Suite | Result (this release) |
+|---|---|
+| Backend (pytest: unit, integration over real SSH, security, RBAC, firewall, discovery, restart safety, import/export, migrations, sessions, failure modes, architecture) | **611 passed, 0 failed, 0 skipped** |
+| Frontend (vitest) + type check + production build | **30 passed**, 0 failed; type check and build OK |
+| Clean installation (Docker, PostgreSQL, nginx, sim-ssh over real SSH; import without model / version) | **48/48** (setup 34 + live 14) |
+| Linux deployment (Ubuntu 24.04 WSL2; init, build, import, backup / restore, HTTPS, teardown) | **24/24** |
+| PostgreSQL upgrade published `main` (0004) → this release (0005) with data, downgrade, re-upgrade | **17/17**: typed models moved to expected metadata, users / search results / verification records kept (`*` record kept as LAB), `alembic check` clean, audit triggers present and firing, discovery afterwards without mismatch, `alembic downgrade 0004` restores the model column and the old code runs, re-upgrade works |
+| SQLite migration 0004 → 0005 → 0004 → 0005 with data; models == migrations | ✔ (test + development database) |
+| Live smoke on the development stack (discovery job, search, categories, registry, network state) | 15/15 functional checks |
+| Rendered UI (switches, form, identity card, failed discovery, settings, import dialog) | 9/9 |
+| Performance (discovery, first search, search at 10 / 50 / 100 / 500) | all PASS (peak 5 sessions) |
 
-Update / rollback (PostgreSQL, published version 8d73c07 → this version): backup → new code →
-`docker compose up -d --build` → migration 0003 → 0004, `alembic check` clean, data and history
-kept; rollback A (restore the pre-upgrade backup with the new scripts, old code) → exact
-pre-upgrade state; rollback B (`alembic downgrade 0003`, old code) → old version runs with all
-data. The previously documented rollback order failed (old code refuses the newer schema) — the
-procedure was corrected.
+New tests in this release: 46 backend (565 → 611) and 3 frontend (27 → 30); tests changed where the
+behaviour changed on purpose (typed model / version, `*` records, TRUNK → UPLINK / LAG, per-row →
+atomic import, DELETE → DEPRECATED).
+
+*(previous release)*: Windows clean installation 36/36, UI audit 112 combinations, backup /
+restore on Windows and Ubuntu, PostgreSQL upgrade 0003 → 0004 and both rollback paths.
+
+# Security Audit
+
+[AUDIT_REPORT.md § 23](AUDIT_REPORT.md): A3-1 typed identity selected commands (HIGH), A3-2 no
+re-verification before a change (HIGH), A3-3 `*` / one-component verification records and no
+lab/production distinction (HIGH), A3-4 no BLOCKED state and destructive revoke (HIGH), A3-5 port
+classes (MEDIUM), A3-6 partial imports by default (MEDIUM), A3-7 imports trusted typed identity /
+no fingerprint (MEDIUM), A3-8 `/api/simple` validation details (MEDIUM), A3-9 no error categories /
+outcomes (MEDIUM), A3-10 breaker ignored mismatches and verification failures (MEDIUM), A3-11 –
+A3-15 LOW (three found by this release's own runs). All fixed and tested.
+
+Unchanged coverage (all passing): injection payloads in every parameter, XSS, CSRF, SSRF, IDOR,
+RBAC bypass on every route, path traversal, upload abuse, CSV injection, arbitrary CLI, secret
+leakage (API, audit, logs, exports, backups). Repository secret scan before each commit: no real
+secret; control-character scan clean.
 
 # Performance
 
-MAC search (simulated switches, 50 ms per command, 5 parallel sessions):
+In-process simulator, 50 ms per CLI command, 5 parallel SSH sessions, this release:
 
-| Switches | Search time | Peak RSS | Peak parallel SSH sessions | SQL per switch |
-|---|---|---|---|---|
-| 100 | 2.74 s | 82.5 MB | 5 | 5.1 |
-| 500 | 14.39 s | 92.4 MB | 5 | 5.0 |
-| 1000 | 27.09 s | 100.9 MB | 5 | 5.0 |
+| Switches | Discovery job | First search (discovers each switch) | Search (discovered) | Peak RSS | Peak sessions |
+|---|---|---|---|---|---|
+| 10 | 0.43 s | 0.42 s | 0.38 s | 81 MB | 5 |
+| 50 | 1.86 s | 1.33 s | 1.06 s | 83 MB | 5 |
+| 100 | 3.03 s | 2.21 s | 1.21 s | 85 MB | 5 |
+| 500 | 14.95 s | 10.46 s | 5.78 s | 92 MB | 5 |
 
-CPU time is close to wall time because the simulated switches run in the same process; the
-published version measured the same (1.8–2.1 s CPU per 100 switches vs. 1.5–2.3 s now). Real
-switches add SSH handshake time (≈ ceil(N / 5) × per-switch time).
-
-PostgreSQL (Docker): import 1000 switches 9.1 s, 5000 switches 55.7 s; validation 5000 rows
-0.64 s; with ~1000 switches: list 83 ms, CSV export 144 ms, JSON export 70 ms, audit page 20 ms,
-dashboard 60 ms; backend memory ≈ 96 MB; database connections ≤ 8 (pool bounded). Parallel
-searches: bounded by the same SSH semaphore and per-user rate limits; an import running while a
-search and an export run completes correctly (test).
-
-# Failure Testing
-
-| Scenario | Result (test / run) |
-|---|---|
-| database unavailable | `/health` 503; DB error during search / restart → generic message, nothing executed |
-| switch unreachable, SSH timeout, authentication failure, malformed output, silent prompt | per-switch status, never a restart offer; circuit breaker counts |
-| MAC not found / on several switches | *Not Found* / *Multiple locations*, no restart |
-| port disappears / MAC moves / VLAN changes after the search | restart blocked, nothing sent |
-| switch disappears during the restart | CRITICAL result with manual instructions; *down* sent once, never repeated |
-| restart timeout (ambiguous *down*) | admin state read first; restore only if needed |
-| backend / frontend container stopped | restore scripts always restart them; health checks report it |
-| corrupted backup file | refused, database unchanged |
-| migration on inconsistent data | refused with the list of problems, nothing changed |
-| Redis unavailable | not applicable (Redis is not used) |
-| disk full | not tested (not practical on this machine) |
-
-# Clean Installation
-
-From a copy of the working tree without any local state (no `.env`, database or dependencies),
-with the documented Windows commands: `init-env.ps1` → `docker compose up -d --build` →
-migrations 0001 → 0004 → admin via CLI → login → credential → **CSV import of 3 SSH switches** +
-idempotent re-import + password-column rejection → host-key enrolment → read-only lab
-verification → technical MAC search over real SSH → port location label → MAC_OPERATOR creation
-and search (location only) → restart blocked by the read-only defaults → export CSV/JSON without
-secrets → backup → restore → opt-in (`READ_ONLY_MODE=false`, `NETWORK_COMMAND_EXECUTION=ENABLED`)
-→ restart blocked in NORMAL → MAINTENANCE → **MAC_OPERATOR direct restart, verified** → change
-report and audit → kill switch blocks → no password in the audit log. **36/36 checks passed**;
-`alembic check` on PostgreSQL clean.
-
-# Windows Deployment
-
-Windows 11, Docker Desktop (Engine 28.5, Compose 2.40), Windows PowerShell 5.1: the installation
-commands of [docs/WINDOWS_SETUP.md](docs/WINDOWS_SETUP.md) were run as written (init, build,
-start, admin creation — scripted variant, health, backup, restore). Not run on Windows: the
-firewall rule and the self-signed HTTPS certificate step (HTTPS was verified on Linux). Two
-Windows-specific defects were found and fixed: CR in passwords piped to the CLI, and restore
-aborting when output is redirected.
-
-# Linux Deployment
-
-Ubuntu 24.04.3 (WSL2) with Docker Engine via Docker Desktop integration, as a normal user in the
-`docker` group: the README / [docs/LINUX_SETUP.md](docs/LINUX_SETUP.md) commands on a
-clone-equivalent tree — **23/23 checks**: `.env` and backups created with mode 600, safe defaults,
-build and start, admin, health, login, import, export, backup, `restore.sh --yes` (marker gone,
-data intact, previous database kept), HTTPS with the unprivileged nginx after the documented
-`chown 101:101` of the key, redirect with port, HSTS, CSP, nginx not root, teardown. Not tested:
-the `ufw` firewall step (needs `sudo`), and a bare-metal server.
-
-# Test Results
-
-| Suite | Result |
-|---|---|
-| Backend (pytest; unit, integration over real SSH to the lab server, security, RBAC, firewall, restart safety, import/export, database migrations, sessions, failure modes, architecture) | **565 passed, 0 failed, 0 skipped** (10 min) |
-| Frontend (vitest) + type check + production build | **27 passed**, 0 failed; typecheck and build OK |
-| Integration (in the backend count) | real SSH to the simulator: 10 transport tests; end-to-end restart flows |
-| Security (in the backend count) | firewall 105, hardening 38, API security 32, MAC_OPERATOR 110, sessions 8, import/export security cases |
-| Database | 4 migration / schema tests (SQLite) + PostgreSQL upgrade, downgrade, rollback and `alembic check` runs |
-| Infrastructure | container users, capabilities, networks, health checks, HTTPS headers verified on running stacks |
-| E2E | Windows clean install 36/36; Linux 23/23; upgrade + 2 rollback paths; UI audit 112/112 |
-| Performance | search 100/500/1000 switches; import 1000/5000; queries at 1 M result rows |
-| CI (GitHub Actions) | runs backend, frontend and Docker build on every push (result reported with the push) |
-
-New tests in this iteration: 143 (422 → 565 backend) and 4 frontend (23 → 27). Two existing
-security tests were repaired because they had become vacuous (A2-3).
+The theoretical floor is N × commands × 50 ms / 5 (500 switches: 5 s per command per switch), so
+the platform adds little overhead; SQL ≈ 5–8 statements per switch. Real switches add SSH
+handshake time (≈ ceil(N / 5) × per-switch time). The first search after an upgrade costs one extra
+`show system` per switch. *(previous release, PostgreSQL)*: import 1000 rows 9.1 s / 5000 rows
+55.7 s (per-row mode); queries at 1 M result rows 0.15–57 ms.
 
 # Known Limitations
 
-1. **No real Alcatel hardware was tested.** All commands are verified against the official ALE CLI
-   reference guides and exercised on the simulator only.
-2. **Lab verification is required** per model family and AOS version before any production use
-   (the application enforces it for real switches).
-3. **The switch model and AOS version must match a verified command profile**; everything else is
-   blocked (and refused by the importer).
-4. **NetBox integration is read-only** (GET only); it is used as additional evidence, never
-   updated. Tested against mocked HTTP responses only.
-5. **Zabbix integration is read-only** (availability and current problems only; no metrics).
-   Tested against mocked HTTP responses only.
-6. **No MFA / SSO / LDAP.**
-7. One backend process by design (rate limits and live progress are in memory).
-8. The switches list is not paginated (fine at 1000 switches; ~4.7 s to render 7000).
-9. No automatic purge of search history (226 bytes per switch per search; plan database size).
-10. Sessions are not bound to the client IP; the audit log's immutability relies on database
-    triggers (the database owner could drop them).
-11. Excel (.xlsx) export not implemented (CSV opens in Excel).
-12. Not tested: host firewall (`ufw` / Windows Firewall rules), disk-full behaviour, a bare-metal
-    Linux server, many users behind one NAT address against the nginx per-IP rate limit.
+1. **No real Alcatel hardware was tested**; no capability is LAB_VERIFIED or PRODUCTION_VERIFIED.
+2. Serial number / chassis information not collected (no verified command).
+3. AOS 7 (OS10K, OS6900 on 7.x) not supported: discovery fails closed.
+4. Expected AOS version compared on major.minor only (release names are not mapped to builds).
+5. NetBox and Zabbix read-only, tested against mocked responses only.
+6. No MFA / SSO / LDAP; one backend process by design; sessions not bound to the client IP.
+7. Switch list not paginated (≈ 0.7 s at 1000 switches, 4.7 s at 7000 — previous release).
+8. No automatic purge of search history.
+9. Not tested: host firewall rules, disk-full behaviour, bare-metal Linux, many users behind one NAT
+   address against the nginx per-IP rate limit.
+
+# Hardware Verification Status
+
+| Item | Level reached by this project |
+|---|---|
+| Discovery (`show system`) | FIXTURE_TESTED + SIMULATED (in-process and over SSH) |
+| Read commands (AOS 8, AOS 6) | FIXTURE_TESTED + SIMULATED (in-process and over SSH) |
+| Restart strategies | SIMULATED (in-process and over SSH) |
+| LAB_VERIFIED on real hardware | **none** |
+| PRODUCTION_VERIFIED | **none** (the clean-installation run demonstrated the promotion mechanism with the SSH simulator and then set the record to BLOCKED; that database was discarded) |
 
 # Production Readiness
 
 | Gate | Status |
 |---|---|
-| Tests pass | ✔ 565 + 27, 0 failed |
-| Security tests pass | ✔ |
-| Database migrations pass | ✔ SQLite + PostgreSQL, upgrade / downgrade / rollback |
-| Clean installation passes | ✔ 36/36 |
-| Docker passes | ✔ hardened stack healthy |
-| Windows documentation verified | ✔ |
-| Linux deployment verified | ✔ Ubuntu 24.04 (WSL2); firewall step not run |
-| MAC_OPERATOR verified | ✔ |
-| Import verified | ✔ |
-| Export verified | ✔ |
-| RBAC verified | ✔ 81 endpoints |
-| Command firewall verified | ✔ no bypass path |
-| No secret leakage | ✔ API, logs, audit, exports, backups, repository |
-| No critical/high unresolved security issues | ✔ (3 HIGH found and fixed) |
-| No database corruption | ✔ |
-| No known bypass of safety controls | ✔ |
+| Tests pass | ✔ 611 + 30, 0 failed, 0 skipped |
+| Security review | ✔ 15 findings fixed; no known unresolved HIGH / CRITICAL |
+| Database migrations | ✔ SQLite; PostgreSQL clean install, upgrade with data, downgrade, re-upgrade (17/17) |
+| Clean installation | ✔ 48/48 |
+| Linux deployment | ✔ 24/24 |
+| Discovery, profile states, MAC_OPERATOR, import / export, RBAC, firewall | ✔ tested |
+| No secret leakage | ✔ API, logs, audit, exports, repository |
 | Real Alcatel hardware validation | ✘ not performed |
 
-**Verdict: APPLICATION PRODUCTION READY FOR LAB VALIDATION.** Next steps before production use:
-lab verification of each model family / AOS version on real switches
-([docs/DEPLOYMENT.md § 5](docs/DEPLOYMENT.md#5-production-enablement)), a first controlled restart
-of one endpoint port, then MAC-operator restarts in maintenance windows.
+**Verdict: READY FOR LAB VALIDATION.** Before production use: discover real lab switches, run the
+read-only verification per model family / AOS version, validate each restart strategy on a lab
+switch (LAB_VERIFIED, `environment = lab`), then promote with the recorded evidence
+(PRODUCTION_VERIFIED) and start with one controlled endpoint restart in a maintenance window.
+
+# Deployment Instructions
+
+New installation: [docs/DEPLOYMENT.md](docs/DEPLOYMENT.md), [docs/WINDOWS_SETUP.md](docs/WINDOWS_SETUP.md),
+[docs/LINUX_SETUP.md](docs/LINUX_SETUP.md). This release is on the branch
+`feature/automatic-discovery`; it is deployed like any version after it is merged:
+
+```bash
+./scripts/backup.sh                 # Windows: .\scripts\backup.ps1
+git pull                            # the version containing migration 0005
+docker compose up -d --build        # migration 0004 → 0005 runs at backend start
+```
+
+Then (see [docs/UPGRADE.md](docs/UPGRADE.md) § migration 0005): *Switches → Discover all*; review
+every *Identity mismatch*; mark lab switches `environment = lab`; note that restarts on production
+switches now require PRODUCTION_VERIFIED records.
+
+# Rollback Instructions
+
+[docs/UPGRADE.md § Rollback](docs/UPGRADE.md#rollback): **A** — restore the pre-upgrade backup with
+the new scripts and run the old code (exact pre-upgrade state); **B** — `docker compose exec
+backend alembic downgrade 0004`, then the old code: the model / version columns get the expected
+(typed) values back, discovery data is dropped. Both leave the audit log append-only.
+
+# Remaining Risks
+
+| Risk | Mitigation in place | Still needed |
+|---|---|---|
+| Real OmniSwitch output differs from the documented examples (discovery or reads) | strict parsing; unexpected output discarded, alerted, counted by the circuit breaker; DISCOVERY_FAILED instead of guessing | lab validation on each model family / AOS version |
+| A restart strategy behaves differently on real hardware | profile states; production needs recorded evidence; post-restart verification; never blind retry | supervised lab tests before any promotion |
+| Wrong expected metadata or mismatches after upgrades flood the operators | mismatch blocks only state changes; reads continue; admin review | procedure for AOS upgrade windows (accept identity afterwards) |
+| An administrator promotes a capability using evidence from a lab SSH simulator | evidence recorded and shown with the record; audit with reason | organisational rule: promote only with evidence from real switches |
+| One backend process | health checks, restart policy, interrupted-job detection | none by design |
