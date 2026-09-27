@@ -30,6 +30,7 @@ from sqlalchemy import desc, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import get_settings
+from app.core.error_categories import category_for_status
 from app.core.errors import AppError, ValidationFailedError
 from app.core.logging import get_logger
 from app.core.timeutil import utcnow
@@ -130,6 +131,7 @@ class SwitchOutcome:
     reachable: bool = False
     switch_error: SwitchError | None = None
     discovered: SystemInfo | None = None  # answer of the discovery command, if it ran
+    category: str = ""                     # safe error category ("" = searched successfully)
 
 
 def _no_profile_message(model: str, version: str, reason: str, *, discovered: bool) -> str:
@@ -214,6 +216,7 @@ async def _search_switch(job: SwitchJob, mac: str, profiles: dict[str, CommandPr
     snap = job.snapshot
 
     def done(status: str, **kw) -> SwitchOutcome:
+        kw.setdefault("category", category_for_status(status))
         return SwitchOutcome(job, status, duration_ms=int((time.monotonic() - started) * 1000),
                              **kw)
 
@@ -293,6 +296,7 @@ async def _search_switch(job: SwitchJob, mac: str, profiles: dict[str, CommandPr
                     commands = session.executed_commands()
     except CommandBlocked as exc:
         return done(SwitchResultStatus.BLOCKED.value, commands=commands,
+                    category=category_for_status("blocked", exc.event),
                     error=f"{exc.title}: {exc.reason}", reachable=True,
                     detected_model=detected_model, detected_version=detected_version,
                     discovered=discovered)
@@ -376,7 +380,7 @@ def _result_rows(search_id: str, outcome: SwitchOutcome) -> list[MacSearchResult
         location=snap.location, model=outcome.detected_model or snap.model,
         aos_version=outcome.detected_version or snap.aos_version, profile_key=outcome.profile_key,
         status=outcome.status, error_message=outcome.error, commands_executed=outcome.commands,
-        duration_ms=outcome.duration_ms,
+        duration_ms=outcome.duration_ms, error_category=outcome.category,
     )
     if not outcome.investigations:
         return [MacSearchResult(**base)]

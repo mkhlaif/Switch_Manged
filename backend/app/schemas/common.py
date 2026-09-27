@@ -353,6 +353,7 @@ class MacSearchResultOut(ORM):
     vlan_id: int | None
     mac_type: str
     operation: str
+    error_category: str = ""
     port_details: dict[str, Any]
     vlans: list[Any]
     tagged_vlans: list[int]
@@ -374,7 +375,7 @@ class MacSearchResultOut(ORM):
         """Safe error category of this switch's result ("" when found / not found)."""
         from app.core.error_categories import category_for_status
 
-        return category_for_status(self.status)
+        return self.error_category or category_for_status(self.status)
 
 
 # ---------------------------------------------------------------- port actions -------------

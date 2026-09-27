@@ -764,8 +764,12 @@ async def run_import(job_id: str) -> None:
                 r["result"], r["message"] = "not_processed", "Not processed."
         changed_ids = [r["switch_id"] for r in rows if r.get("result") in ("imported", "updated")
                        and r.get("switch_id")]
+        # Started BEFORE the import is marked final, so a client that sees "completed" also
+        # sees the discovery job.
+        discovery_job_id = await _discover_imported(db, creator_id, changed_ids)
         now = utcnow()
         await db.execute(update(ImportJob).where(ImportJob.id == job_id).values(
+            discovery_job_id=discovery_job_id,
             rows=rows, processed=processed, status=outcome.value, error=error,
             failed_at=now if outcome is ImportStatus.FAILED else None,
             completed_at=None if outcome is ImportStatus.FAILED else now, **counts))
@@ -780,28 +784,29 @@ async def run_import(job_id: str) -> None:
                              f"unchanged, {counts['skipped']} skipped, {counts['failed']} failed"
                              + (f" — {error}" if error else ""),
                      details={**counts, "mode": mode, "changed_switches": names[:2000]})
-        await _discover_imported(db, job_id, creator_id, changed_ids)
 
 
-async def _discover_imported(db: AsyncSession, job_id: str, creator_id: int | None,
-                             switch_ids: list[int]) -> None:
+async def _discover_imported(db: AsyncSession, creator_id: int | None,
+                             switch_ids: list[int]) -> str:
     """Automatic discovery after the import, for the switches that can be reached without
-    trusting an unverified host key."""
+    trusting an unverified host key. Returns the discovery job id ("" when none)."""
     from app.services.discovery.service import can_discover, create_job
 
     if not switch_ids or creator_id is None:
-        return
+        return ""
     user = await db.get(User, creator_id)
     if user is None:
-        return
+        return ""
     switches = (await db.execute(select(Switch).where(Switch.id.in_(switch_ids)))).scalars()
     ids = [sw.id for sw in switches if can_discover(sw)]
     if not ids:
-        return
-    discovery_job = await create_job(db, user, ids, source="import")
-    await db.execute(update(ImportJob).where(ImportJob.id == job_id).values(
-        discovery_job_id=discovery_job.id))
-    await db.commit()
+        return ""
+    try:
+        return (await create_job(db, user, ids, source="import")).id
+    except Exception:  # noqa: BLE001 - the import itself is done; discovery can be re-run
+        log.exception("Could not start the discovery of imported switches")
+        await db.rollback()
+        return ""
 
 
 async def mark_interrupted_imports(db: AsyncSession) -> int:

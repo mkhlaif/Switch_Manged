@@ -111,6 +111,9 @@ class MacSearchResult(Base):
     vlan_id: Mapped[int | None] = mapped_column(Integer, nullable=True)
     mac_type: Mapped[str] = mapped_column(String(32), default="")
     operation: Mapped[str] = mapped_column(String(32), default="")
+    # Safe error category of a failed switch (e.g. PROFILE_NOT_VERIFIED rather than the generic
+    # OPERATION_BLOCKED); "" when the switch was searched successfully.
+    error_category: Mapped[str] = mapped_column(String(32), default="", server_default="")
 
     port_details: Mapped[dict] = mapped_column(JSON, default=dict)
     vlans: Mapped[list] = mapped_column(JSON, default=list)

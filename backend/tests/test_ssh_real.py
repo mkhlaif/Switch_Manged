@@ -209,3 +209,35 @@ async def test_connector_concurrency_limit_and_authorized_restart(ssh_lab, firew
             await restart.down()
     assert not switches["SIM-SW-01"].ports["1/1/26"].admin_up
     assert switches["SIM-SW-01"].command_log[-1] == "interfaces port 1/1/26 admin-state disable"
+
+
+async def test_search_reports_missing_read_verification_precisely(admin, ssh_lab):
+    """A discovered real-SSH switch without a READ record is blocked, and the result carries
+    the precise safe category (not the generic OPERATION_BLOCKED)."""
+    from app.core.crypto import encrypt_secret
+    from app.db.session import session_factory
+    from app.models import Credential, Switch
+    from tests.conftest import verify, wait_for_search
+
+    _switches, ports = ssh_lab
+    port, pub = ports["SIM-SW-01"]
+    async with session_factory()() as db:
+        cred = Credential(name="lab", username=SIM_USERNAME,
+                          password_encrypted=encrypt_secret(SIM_PASSWORD))
+        db.add(cred)
+        await db.flush()
+        db.add(Switch(name="REAL-1", host="127.0.0.1", ssh_port=port, transport="ssh",
+                      host_key=pub, host_key_fingerprint="x", credential_id=cred.id,
+                      vendor="ALE", model="OS6860E-P24", aos_version="8.9.221.R03",
+                      discovery_status="discovered"))
+        await db.commit()
+    resp = await admin.post("/api/mac/search", json={"mac": "00:11:22:33:44:55"})
+    await wait_for_search(admin, resp.json()["id"])
+    rows = (await admin.get(f"/api/mac/search/{resp.json()['id']}/results")).json()
+    assert (rows[0]["status"], rows[0]["category"]) == ("blocked", "PROFILE_NOT_VERIFIED")
+    # With the READ record (LAB_VERIFIED is enough for reads) the same switch is searched.
+    await verify("AOS8", "READ", "8.9", model_family="OS6860")
+    resp = await admin.post("/api/mac/search", json={"mac": "00:11:22:33:44:55"})
+    await wait_for_search(admin, resp.json()["id"])
+    rows = (await admin.get(f"/api/mac/search/{resp.json()['id']}/results")).json()
+    assert rows[0]["status"] == "found" and rows[0]["category"] == ""

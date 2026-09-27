@@ -88,6 +88,9 @@ def upgrade() -> None:
         batch_op.add_column(sa.Column('discovery_job_id', sa.String(length=36), server_default='', nullable=False))
         batch_op.create_check_constraint(op.f('ck_import_jobs_mode_valid'), "mode IN ('atomic', 'per_row')")
 
+    with op.batch_alter_table('mac_search_results', schema=None) as batch_op:
+        batch_op.add_column(sa.Column('error_category', sa.String(length=32), server_default='', nullable=False))
+
     with op.batch_alter_table('port_actions', schema=None) as batch_op:
         batch_op.add_column(sa.Column('outcome', sa.String(length=24), server_default='', nullable=False))
         batch_op.add_column(sa.Column('error_category', sa.String(length=32), server_default='', nullable=False))
@@ -137,6 +140,9 @@ def downgrade() -> None:
         batch_op.drop_column('discovery_status')
         batch_op.drop_column('vendor')
     _recreate_switch_expression_indexes()
+
+    with op.batch_alter_table('mac_search_results', schema=None) as batch_op:
+        batch_op.drop_column('error_category')
 
     with op.batch_alter_table('port_actions', schema=None) as batch_op:
         batch_op.drop_column('profile_version')
